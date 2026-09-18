@@ -1,0 +1,31 @@
+# Builds an image containing minitail plus a pinned open source Tailscale
+# release, used for both the exit node and the client under test.
+ARG GO_VERSION=1.24
+
+FROM golang:${GO_VERSION}-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# nogui: the integration tests exercise the headless path, and the systray
+# adapter needs a macOS toolchain.
+RUN CGO_ENABLED=0 go build -tags nogui -trimpath -o /out/minitail ./cmd/minitail
+
+FROM alpine:3.20
+ARG TS_VERSION
+ARG TARGETARCH=amd64
+RUN apk add --no-cache ca-certificates curl iproute2 iptables iputils busybox-extras
+# The open source tailscaled and tailscale CLI, matching what Homebrew's
+# `tailscale` formula ships on macOS.
+RUN set -eu; \
+    curl -fsSL "https://pkgs.tailscale.com/stable/tailscale_${TS_VERSION}_${TARGETARCH}.tgz" -o /tmp/ts.tgz; \
+    tar -xzf /tmp/ts.tgz -C /tmp; \
+    mv "/tmp/tailscale_${TS_VERSION}_${TARGETARCH}/tailscale" /usr/local/bin/tailscale; \
+    mv "/tmp/tailscale_${TS_VERSION}_${TARGETARCH}/tailscaled" /usr/local/bin/tailscaled; \
+    rm -rf /tmp/ts.tgz "/tmp/tailscale_${TS_VERSION}_${TARGETARCH}"
+COPY --from=build /out/minitail /usr/local/bin/minitail
+COPY test/integration/exitnode-entrypoint.sh /usr/local/bin/exitnode-entrypoint.sh
+COPY test/integration/client-entrypoint.sh /usr/local/bin/client-entrypoint.sh
+COPY test/integration/router-entrypoint.sh /usr/local/bin/router-entrypoint.sh
+RUN chmod +x /usr/local/bin/exitnode-entrypoint.sh /usr/local/bin/client-entrypoint.sh \
+    /usr/local/bin/router-entrypoint.sh

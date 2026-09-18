@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Unit tests and static checks. These carry the state machine coverage, so
+  # they are the fastest signal and run on every push.
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: |
+          go vet ./...
+          # The systray adapter only compiles for macOS; type-check the rest of
+          # the darwin build here so that job does not have to find it.
+          GOOS=darwin go vet -tags nogui ./...
+
+      - name: Test
+        run: go test -race ./...
+
+      - name: Check generated icons are up to date
+        run: |
+          cd internal/icons
+          go run gen.go
+          git diff --exit-code -- .
+
+  # Functional tests against a real Headscale control server and real
+  # Tailscale clients, in Docker. These are the ones that matter; the macOS
+  # runner cannot host them.
+  integration:
+    name: Integration (tailscale ${{ matrix.tailscale }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Current stable and one prior release: netstack behaviour and the
+        # status JSON shape are the two things most likely to shift.
+        tailscale: ["1.102.4", "1.98.10"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run integration suite
+        working-directory: test/integration
+        env:
+          TS_VERSION: ${{ matrix.tailscale }}
+        run: go test -tags integration -timeout 25m -v ./...
+
+  # Packaging only. GitHub's macOS runners are a poor proxy for a laptop
+  # running a corporate VPN and a container runtime, so this deliberately
+  # makes no networking assertions.
+  macos:
+    name: macOS build and packaging
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build -o minitail ./cmd/minitail
+
+      - name: Test
+        run: go test ./...
+
+      - name: Smoke test the binary
+        run: |
+          ./minitail version
+          ./minitail help
+          ./minitail service status
+
+      - name: Validate the LaunchAgent plist
+        run: |
+          go run ./test/plist "$PWD/minitail" > /tmp/minitail.plist
+          plutil -lint /tmp/minitail.plist
+          echo "--- generated plist ---"
+          cat /tmp/minitail.plist
+
+      - name: Check the Homebrew formula
+        run: |
+          brew style Formula/minitail.rb

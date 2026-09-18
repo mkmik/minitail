@@ -36,6 +36,8 @@ type Options struct {
 	ControlURL string
 	// AuthKey makes login non-interactive when non-empty.
 	AuthKey string
+	// AdvertiseRoutes are extra subnets to advertise as a subnet router.
+	AdvertiseRoutes string
 	// Timeout bounds short-lived commands such as `status`.
 	Timeout time.Duration
 	// Logf receives command-level diagnostics.
@@ -87,7 +89,9 @@ func (c *CLI) upFlags() []string {
 		"--advertise-exit-node",
 		"--accept-routes=false",
 		"--accept-dns=false",
-		"--advertise-routes=", // exit node only, never a subnet router
+		// Exit node only unless the user explicitly names subnets: an exit
+		// node does not forward to LANs attached directly to this machine.
+		"--advertise-routes=" + c.opts.AdvertiseRoutes,
 	}
 }
 

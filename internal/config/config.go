@@ -48,6 +48,18 @@ type Config struct {
 	// AuthKey, when set, makes the first login non-interactive.
 	AuthKey string
 
+	// AdvertiseRoutes are extra subnets to advertise as a subnet router,
+	// beyond the exit node advertisement. Empty by default.
+	//
+	// This exists because a Tailscale exit node deliberately refuses to
+	// forward traffic to subnets that are configured directly on one of its
+	// own interfaces (the "guest wifi" rule in ipnlocal.shrinkDefaultRoute):
+	// peers get internet access, not LAN access. Networks reached through a
+	// gateway are unaffected. Container runtimes such as OrbStack attach
+	// their bridges directly to the host, so reaching those container IPs
+	// through this node requires naming their subnets here.
+	AdvertiseRoutes string
+
 	// PollInterval is how often the supervisor polls `tailscale status`.
 	PollInterval time.Duration
 
@@ -99,6 +111,8 @@ func (c *Config) RegisterFlags(fs *flag.FlagSet) {
 	fs.StringVar(&c.TailscalePath, "tailscale", "", "path to the tailscale CLI binary (default: found on PATH)")
 	fs.StringVar(&c.ControlURL, "control-url", "", "coordination server URL (default: Tailscale's)")
 	fs.StringVar(&c.AuthKey, "auth-key", "", "pre-authentication key for non-interactive login")
+	fs.StringVar(&c.AdvertiseRoutes, "advertise-routes", c.AdvertiseRoutes,
+		"comma-separated subnets to also advertise as a subnet router, for LANs attached directly to this machine (e.g. OrbStack bridges) that an exit node would otherwise not forward to")
 	fs.DurationVar(&c.PollInterval, "poll-interval", c.PollInterval, "how often to poll tailscaled for status")
 	fs.BoolVar(&c.Verbose, "verbose", c.Verbose, "enable verbose tailscaled logging")
 }
@@ -134,6 +148,9 @@ func (c *Config) Resolve() error {
 	}
 	if c.ControlURL == "" {
 		c.ControlURL = os.Getenv("MINITAIL_CONTROL_URL")
+	}
+	if c.AdvertiseRoutes == "" {
+		c.AdvertiseRoutes = os.Getenv("MINITAIL_ADVERTISE_ROUTES")
 	}
 	if c.PollInterval <= 0 {
 		c.PollInterval = 2 * time.Second

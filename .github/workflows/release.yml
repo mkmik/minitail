@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)publish
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish release and bump the formula
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the tag
+        id: tag
+        run: echo "name=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.tag.outputs.name }}"
+          gh release view "$tag" >/dev/null 2>&1 ||
+            gh release create "$tag" --title "$tag" --generate-notes
+
+      # The formula builds from the tag's source tarball, so the only thing
+      # that has to change on a release is the URL and its checksum.
+      - name: Point the formula at the new tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.name }}"
+          url="https://github.com/${{ github.repository }}/archive/refs/tags/${tag}.tar.gz"
+          curl -fsSL "$url" -o /tmp/src.tar.gz
+          sha="$(sha256sum /tmp/src.tar.gz | cut -d' ' -f1)"
+          echo "$tag -> $sha"
+
+          python3 - "$url" "$sha" <<'PY'
+          import re, sys
+          url, sha = sys.argv[1], sys.argv[2]
+          path = "Formula/minitail.rb"
+          src = open(path).read()
+          src = re.sub(r'^  url ".*"$', f'  url "{url}"', src, count=1, flags=re.M)
+          src = re.sub(r'^  sha256 ".*"$', f'  sha256 "{sha}"', src, count=1, flags=re.M)
+          open(path, "w").write(src)
+          PY
+
+          if git diff --quiet -- Formula/minitail.rb; then
+            echo "formula already up to date"
+            exit 0
+          fi
+          default_branch="$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin "$default_branch"
+          git checkout "$default_branch"
+          # Re-apply on top of the branch, in case it moved since the tag.
+          python3 - "$url" "$sha" <<'PY'
+          import re, sys
+          url, sha = sys.argv[1], sys.argv[2]
+          path = "Formula/minitail.rb"
+          src = open(path).read()
+          src = re.sub(r'^  url ".*"$', f'  url "{url}"', src, count=1, flags=re.M)
+          src = re.sub(r'^  sha256 ".*"$', f'  sha256 "{sha}"', src, count=1, flags=re.M)
+          open(path, "w").write(src)
+          PY
+          git add Formula/minitail.rb
+          git commit -m "Point the Homebrew formula at ${tag}"
+          git push origin "$default_branch"

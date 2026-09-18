@@ -1,0 +1,113 @@
+# Topology for the minitail integration tests.
+#
+#   client ──[ts]── exitnode ──[transit]── router ── 192.0.2.40 (on its loopback)
+#              │
+#          headscale
+#
+#   ts       172.28.0.0/24    headscale .10, exitnode .20, client .30
+#   transit  198.51.100.0/24  exitnode .20, router .2
+#   dest     192.0.2.40       an address the router owns, on no network at all
+#
+# The router serves the same HTTP content on both of its addresses, which makes
+# the pair of assertions a controlled comparison:
+#
+#   * 192.0.2.40 is reachable from the exit node only because of a static route
+#     in the exit node's own table, so reaching it proves egress follows the
+#     host routing table. `client` has no route to it whatsoever.
+#   * 198.51.100.2 is the same host, but on a subnet the exit node is directly
+#     attached to. A Tailscale exit node deliberately refuses to forward there
+#     (ipnlocal.shrinkDefaultRoute makes an exit node "guest wifi", not LAN
+#     access), so it must stay unreachable.
+#
+# 192.0.2.0/24 is TEST-NET-1 and 198.51.100.0/24 is TEST-NET-2; neither is a
+# Docker network, which keeps Docker's own anti-spoofing rules out of the way.
+name: minitail-it
+
+services:
+  headscale:
+    image: ghcr.io/juanfont/headscale:${HEADSCALE_VERSION:-v0.27.1}
+    command: serve
+    volumes:
+      - ./headscale.yaml:/etc/headscale/config.yaml:ro
+      # Tailnets need an explicit autogroup:internet grant before a client may
+      # egress through an exit node; without it the exit node's own filter
+      # drops the flow and replies with a TSMP rejection.
+      - ./headscale-policy.json:/etc/headscale/policy.json:ro
+      - headscale-data:/var/lib/headscale
+      - headscale-run:/var/run/headscale
+    networks:
+      ts:
+        ipv4_address: 172.28.0.10
+
+  # An IP router that also hosts the destination. It reuses the node image
+  # because that is where busybox-extras (and therefore httpd) is installed.
+  router:
+    build: &node_image
+      context: ../..
+      dockerfile: test/integration/Dockerfile.node
+      args:
+        TS_VERSION: ${TS_VERSION:-1.102.4}
+    entrypoint: ["/usr/local/bin/router-entrypoint.sh"]
+    cap_add:
+      - NET_ADMIN
+    networks:
+      transit:
+        ipv4_address: 198.51.100.2
+
+  exitnode:
+    build: *node_image
+    entrypoint: ["/usr/local/bin/exitnode-entrypoint.sh"]
+    # A stable hostname so the test can find this node in the control plane.
+    command: ["--hostname=minitail-exit"]
+    environment:
+      MINITAIL_STATE_DIR: /var/lib/minitail
+      MINITAIL_CONTROL_URL: http://headscale:8080
+      # The suite is hermetic: tailscaled must not try to reach Tailscale's
+      # own logging service.
+      TS_NO_LOGS_NO_SUPPORT: "true"
+      # Headscale's embedded DERP is served over plain HTTP here, which a
+      # client would otherwise refuse to speak to.
+      TS_DEBUG_USE_DERP_HTTP: "1"
+    # Deliberately no cap_add and no /dev/net/tun: userspace networking mode
+    # needs neither, and the absence of both is part of what is under test.
+    # The static route this container needs is injected from outside, into its
+    # network namespace, so that it stays unprivileged.
+    networks:
+      ts:
+        ipv4_address: 172.28.0.20
+      transit:
+        ipv4_address: 198.51.100.20
+    depends_on:
+      - headscale
+      - router
+
+  client:
+    build: *node_image
+    entrypoint: ["/usr/local/bin/client-entrypoint.sh"]
+    environment:
+      TS_NO_LOGS_NO_SUPPORT: "true"
+      TS_DEBUG_USE_DERP_HTTP: "1"
+    # An ordinary kernel-mode Tailscale node, which does need these.
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks:
+      ts:
+        ipv4_address: 172.28.0.30
+    depends_on:
+      - headscale
+
+networks:
+  ts:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+  transit:
+    ipam:
+      config:
+        - subnet: 198.51.100.0/24
+
+volumes:
+  headscale-data:
+  headscale-run:
