@@ -1,0 +1,47 @@
+{
+  "Version": "1.102.4-t8a1b2c3d4",
+  "TUN": false,
+  "BackendState": "Running",
+  "HaveNodeKey": true,
+  "AuthURL": "",
+  "TailscaleIPs": [
+    "100.101.102.103",
+    "fd7a:115c:a1e0::1234:5678"
+  ],
+  "Self": {
+    "ID": "nXYZ123CNTRL",
+    "PublicKey": "nodekey:5f3c0f1e2d3c4b5a69788796a5b4c3d2e1f00918273645546372819aabbccdde",
+    "HostName": "workbook-exit",
+    "DNSName": "workbook-exit.tail9f2c.ts.net.",
+    "OS": "macOS",
+    "UserID": 1234567890,
+    "TailscaleIPs": [
+      "100.101.102.103",
+      "fd7a:115c:a1e0::1234:5678"
+    ],
+    "AllowedIPs": [
+      "100.101.102.103/32",
+      "fd7a:115c:a1e0::1234:5678/128",
+      "0.0.0.0/0",
+      "::/0"
+    ],
+    "Addrs": [],
+    "CurAddr": "",
+    "Relay": "",
+    "Online": true,
+    "ExitNode": false,
+    "ExitNodeOption": true,
+    "Active": false,
+    "InNetworkMap": true,
+    "InMagicSock": true,
+    "InEngine": true
+  },
+  "Health": [],
+  "MagicDNSSuffix": "tail9f2c.ts.net",
+  "CurrentTailnet": {
+    "Name": "example.com",
+    "MagicDNSSuffix": "tail9f2c.ts.net",
+    "MagicDNSEnabled": true
+  },
+  "Peer": null
+}

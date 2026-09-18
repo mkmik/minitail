@@ -1,0 +1,38 @@
+{
+  "Version": "1.102.4-t8a1b2c3d4",
+  "TUN": false,
+  "BackendState": "NeedsLogin",
+  "AuthURL": "https://login.tailscale.com/a/8f2c41d0b93e",
+  "TailscaleIPs": null,
+  "Self": {
+    "ID": "",
+    "PublicKey": "nodekey:0000000000000000000000000000000000000000000000000000000000000000",
+    "HostName": "workbook-exit",
+    "DNSName": "",
+    "OS": "macOS",
+    "UserID": 0,
+    "TailscaleIPs": null,
+    "Addrs": [],
+    "CurAddr": "",
+    "Relay": "",
+    "RxBytes": 0,
+    "TxBytes": 0,
+    "Created": "0001-01-01T00:00:00Z",
+    "LastWrite": "0001-01-01T00:00:00Z",
+    "LastSeen": "0001-01-01T00:00:00Z",
+    "LastHandshake": "0001-01-01T00:00:00Z",
+    "Online": false,
+    "ExitNode": false,
+    "ExitNodeOption": false,
+    "Active": false,
+    "InNetworkMap": false,
+    "InMagicSock": false,
+    "InEngine": false
+  },
+  "Health": [
+    "not logged in, last login error=<nil>"
+  ],
+  "MagicDNSSuffix": "",
+  "CurrentTailnet": null,
+  "Peer": null
+}
