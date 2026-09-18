@@ -8,9 +8,10 @@
 class Minitail < Formula
   desc "Isolated Tailscale exit node for macOS that touches no routes or DNS"
   homepage "https://github.com/mkmik/minitail"
-  url "https://github.com/mkmik/minitail/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "MIT"
+  # No tagged release yet, so this builds the tip of the default branch.
+  # Pushing a v* tag runs .github/workflows/release.yml, which adds a stable
+  # url and sha256 here and makes `brew install` use the release instead.
   head "https://github.com/mkmik/minitail.git"
 
   # "tailscale" is the open source tailscaled and CLI. minitail supervises its

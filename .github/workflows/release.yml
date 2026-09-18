@@ -46,35 +46,17 @@ jobs:
           sha="$(sha256sum /tmp/src.tar.gz | cut -d' ' -f1)"
           echo "$tag -> $sha"
 
-          python3 - "$url" "$sha" <<'PY'
-          import re, sys
-          url, sha = sys.argv[1], sys.argv[2]
-          path = "Formula/minitail.rb"
-          src = open(path).read()
-          src = re.sub(r'^  url ".*"$', f'  url "{url}"', src, count=1, flags=re.M)
-          src = re.sub(r'^  sha256 ".*"$', f'  sha256 "{sha}"', src, count=1, flags=re.M)
-          open(path, "w").write(src)
-          PY
-
-          if git diff --quiet -- Formula/minitail.rb; then
-            echo "formula already up to date"
-            exit 0
-          fi
           default_branch="$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin "$default_branch"
           git checkout "$default_branch"
-          # Re-apply on top of the branch, in case it moved since the tag.
-          python3 - "$url" "$sha" <<'PY'
-          import re, sys
-          url, sha = sys.argv[1], sys.argv[2]
-          path = "Formula/minitail.rb"
-          src = open(path).read()
-          src = re.sub(r'^  url ".*"$', f'  url "{url}"', src, count=1, flags=re.M)
-          src = re.sub(r'^  sha256 ".*"$', f'  sha256 "{sha}"', src, count=1, flags=re.M)
-          open(path, "w").write(src)
-          PY
+
+          python3 .github/scripts/bump-formula.py "$url" "$sha"
+          if git diff --quiet -- Formula/minitail.rb; then
+            echo "formula already up to date"
+            exit 0
+          fi
           git add Formula/minitail.rb
           # [skip ci]: the bump only rewrites two lines of the formula, which
           # the release's own run already validated.

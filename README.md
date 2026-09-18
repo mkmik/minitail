@@ -23,6 +23,14 @@ That installs the open source `tailscale` package as a dependency (the CLI
 package, not the Mac App Store app — the two coexist happily), and registers a
 LaunchAgent so minitail starts at login.
 
+There is no tagged release yet, so the formula builds the tip of the default
+branch. Pushing a `v*` tag publishes a release and rewrites the formula to
+build that instead:
+
+```sh
+git tag -a v0.1.0 -m "minitail v0.1.0" && git push origin v0.1.0
+```
+
 Then, once:
 
 1. A browser opens so you can log this node in to your tailnet. The menu bar
