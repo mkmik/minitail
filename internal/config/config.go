@@ -67,20 +67,19 @@ type Config struct {
 	Verbose bool
 }
 
-// Default returns a Config with all paths resolved but no binaries looked up.
+// Default returns a Config with the user-settable fields filled in. The socket
+// paths and the binary locations are derived by Resolve, which every caller
+// runs after flag parsing.
 func Default() Config {
 	host, _ := os.Hostname()
 	if host == "" {
 		host = "mac"
 	}
-	dir := defaultStateDir()
 	return Config{
-		StateDir:         dir,
-		TailscaledSocket: filepath.Join(dir, "tailscaled.sock"),
-		ControlSocket:    filepath.Join(dir, "minitail.sock"),
-		Port:             DefaultPort,
-		Hostname:         host + "-exit",
-		PollInterval:     2 * time.Second,
+		StateDir:     defaultStateDir(),
+		Port:         DefaultPort,
+		Hostname:     host + "-exit",
+		PollInterval: 2 * time.Second,
 	}
 }
 
@@ -128,6 +127,10 @@ var extraBinDirs = []string{
 
 // Resolve fills in defaults that depend on other fields, looks up the
 // Tailscale binaries, and validates the result.
+//
+// The paths are derived before the binaries are looked up, so a caller that
+// only needs the socket paths (`minitail status`) can use them even when the
+// lookup fails because Tailscale is not installed.
 func (c *Config) Resolve() error {
 	if c.StateDir == "" {
 		return fmt.Errorf("state dir must not be empty")
@@ -140,9 +143,10 @@ func (c *Config) Resolve() error {
 	if c.TailscaledSocket == "" {
 		c.TailscaledSocket = filepath.Join(c.StateDir, "tailscaled.sock")
 	}
-	if c.ControlSocket == "" {
-		c.ControlSocket = filepath.Join(c.StateDir, "minitail.sock")
-	}
+	// Always derived from the state dir, never carried over: -state-dir has to
+	// move minitail's own control socket too, or `minitail status
+	// -state-dir=X` would query the default instance rather than X's.
+	c.ControlSocket = filepath.Join(c.StateDir, "minitail.sock")
 	if c.AuthKey == "" {
 		c.AuthKey = os.Getenv("MINITAIL_AUTH_KEY")
 	}

@@ -19,6 +19,10 @@ const (
 func TestDefaultsAreIsolated(t *testing.T) {
 	t.Setenv("MINITAIL_STATE_DIR", "/tmp/minitail-test")
 	cfg := config.Default()
+	cfg.TailscaledPath, cfg.TailscalePath = "/bin/true", "/bin/true"
+	if err := cfg.Resolve(); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
 
 	if cfg.Port == systemPort {
 		t.Errorf("Port = %d, which collides with a system tailscaled", cfg.Port)
@@ -51,6 +55,10 @@ func TestStateDirHonoursXDG(t *testing.T) {
 func TestTailscaledArgs(t *testing.T) {
 	t.Setenv("MINITAIL_STATE_DIR", "/tmp/minitail-test")
 	cfg := config.Default()
+	cfg.TailscaledPath, cfg.TailscalePath = "/bin/true", "/bin/true"
+	if err := cfg.Resolve(); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
 	args := cfg.TailscaledArgs()
 
 	if !slices.Contains(args, "--tun=userspace-networking") {
@@ -70,6 +78,27 @@ func TestTailscaledArgs(t *testing.T) {
 		if strings.HasPrefix(a, "--tun=") && a != "--tun=userspace-networking" {
 			t.Errorf("unexpected tun flag %q", a)
 		}
+	}
+}
+
+// TestResolveMovesControlSocketWithStateDir guards the case where -state-dir
+// points at another instance: `minitail status` must talk to that one.
+func TestResolveMovesControlSocketWithStateDir(t *testing.T) {
+	t.Setenv("MINITAIL_STATE_DIR", "/tmp/minitail-default")
+	other := t.TempDir()
+
+	cfg := config.Default()
+	cfg.StateDir = other
+	cfg.TailscaledPath = "/bin/true"
+	cfg.TailscalePath = "/bin/true"
+	if err := cfg.Resolve(); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if want := other + "/minitail.sock"; cfg.ControlSocket != want {
+		t.Errorf("ControlSocket = %q, want %q", cfg.ControlSocket, want)
+	}
+	if want := other + "/tailscaled.sock"; cfg.TailscaledSocket != want {
+		t.Errorf("TailscaledSocket = %q, want %q", cfg.TailscaledSocket, want)
 	}
 }
 
