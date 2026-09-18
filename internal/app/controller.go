@@ -49,8 +49,6 @@ type Options struct {
 	Notifier  Notifier
 	Opener    Opener
 	Logf      func(format string, args ...any)
-	// Now is injected for tests.
-	Now func() time.Time
 }
 
 // Controller owns the daemon lifecycle and the polling loop, and publishes a
@@ -81,9 +79,6 @@ type Controller struct {
 func NewController(opts Options) *Controller {
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
-	}
-	if opts.Now == nil {
-		opts.Now = time.Now
 	}
 	if opts.Notifier == nil {
 		opts.Notifier = NotifyFunc(func(string, string) error { return nil })

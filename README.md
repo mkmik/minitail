@@ -148,8 +148,10 @@ minitail run -h            # every flag
 `minitail status` talks to the running supervisor over a unix socket, and falls
 back to querying tailscaled directly if minitail is not running.
 
-Logs are in `~/Library/Logs/minitail/minitail.log` (minitail itself) and
-`~/.config/minitail/tailscaled.log` (the daemon).
+`tailscaled`'s own output is always in `~/.config/minitail/tailscaled.log`.
+minitail's own log depends on how you started it: `$(brew --prefix)/var/log/minitail.log`
+under `brew services`, or `~/Library/Logs/minitail/minitail.log` under the
+LaunchAgent that `scripts/install.sh` and `minitail service install` write.
 
 ## Testing
 

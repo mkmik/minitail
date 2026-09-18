@@ -76,5 +76,7 @@ jobs:
           open(path, "w").write(src)
           PY
           git add Formula/minitail.rb
-          git commit -m "Point the Homebrew formula at ${tag}"
+          # [skip ci]: the bump only rewrites two lines of the formula, which
+          # the release's own run already validated.
+          git commit -m "Point the Homebrew formula at ${tag} [skip ci]"
           git push origin "$default_branch"
