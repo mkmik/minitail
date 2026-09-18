@@ -23,9 +23,24 @@ That installs the open source `tailscale` package as a dependency (the CLI
 package, not the Mac App Store app — the two coexist happily), and registers a
 LaunchAgent so minitail starts at login.
 
-There is no tagged release yet, so the formula builds the tip of the default
-branch. Pushing a `v*` tag publishes a release and rewrites the formula to
-build that instead:
+### Updating
+
+There is no tagged release yet, so the formula has only a `head` spec and
+`brew install` builds the tip of the default branch. Homebrew does not check a
+HEAD install against upstream unless you ask it to, so plain `brew upgrade`
+will report nothing to do however far behind you are. To update:
+
+```sh
+brew update && brew upgrade --fetch-HEAD minitail
+brew services restart minitail
+```
+
+(`brew reinstall minitail` also works — it always re-fetches — and the restart
+is what makes the running supervisor pick up the new binary.)
+
+To get ordinary versioned upgrades instead, tag a release. That publishes it
+and rewrites the formula to build from the tarball, after which `brew upgrade`
+behaves normally and `--fetch-HEAD` is no longer needed:
 
 ```sh
 git tag -a v0.1.0 -m "minitail v0.1.0" && git push origin v0.1.0

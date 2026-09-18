@@ -41,6 +41,9 @@ class Minitail < Formula
       Start minitail and have it come back after a reboot:
         brew services start minitail
 
+      This is a HEAD install, which `brew upgrade` skips by default. Update with:
+        brew update && brew upgrade --fetch-HEAD minitail && brew services restart minitail
+
       The first run opens a browser so you can log this node in to your tailnet.
       It then appears in the admin console as a separate machine; you must
       approve its exit node advertisement there before other devices can use it:
