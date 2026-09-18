@@ -25,23 +25,33 @@ const defaultTSVersion = "1.102.4"
 
 // The test topology, mirroring docker-compose.yml.
 const (
-	// destURL is served by the router on an address it owns privately. The
-	// exit node can only reach it by following destNetwork's static route.
-	destURL = "http://192.0.2.40:8080/"
-	// destNetwork is the network the exit node needs a route to.
+	// destAddr/destURL are served by the router on an address it owns
+	// privately. The minitail node can only reach it by following
+	// destNetwork's static route.
+	destAddr = "192.0.2.40"
+	destURL  = "http://192.0.2.40:8080/"
+	// destNetwork is the network the minitail node needs a route to.
 	destNetwork = "192.0.2.0/24"
-	// routerTransitIP is the router's address on the exit node's transit LAN,
-	// serving the very same content as destURL. It is reachable from the exit
-	// node but, being directly attached, deliberately not forwarded to peers.
+	// routerTransitIP is the router's address on a LAN the minitail node is
+	// directly attached to, serving the very same content as destURL. An exit
+	// node would refuse to forward there; a subnet route must not.
 	routerTransitIP  = "198.51.100.2"
 	routerTransitURL = "http://198.51.100.2:8080/"
+	// dnsServer is inside an advertised subnet, so queries reach it through
+	// the subnet router. dnsName is what it resolves.
+	dnsServer = "192.0.2.53"
+	dnsName   = "corp.internal"
+	// advertised are the routes the node under test offers.
+	advertisedSubnet = "192.0.2.0/24"
+	advertisedLAN    = "198.51.100.0/24"
 	// peerURL reports back the source address the destination actually sees.
 	peerURL = "http://192.0.2.40:8080/cgi-bin/peer"
-	// exitNodeTransitIP is the exit node's own address on the transit LAN,
+	// nodeTransitIP is the minitail node's own address on the transit LAN,
 	// which is the source address its outbound sockets use.
-	exitNodeTransitIP = "198.51.100.20"
-	// exitNodeHostname is the name the exit node registers under.
-	exitNodeHostname = "minitail-exit"
+	nodeTransitIP = "198.51.100.20"
+	// nodeHostname is the name the node under test registers under; it comes
+	// from the config file the entrypoint writes.
+	nodeHostname = "minitail-test"
 	// headscaleUser is the Headscale user both nodes belong to.
 	headscaleUser = "test"
 )
@@ -79,22 +89,21 @@ func newCompose(t *testing.T) *compose {
 	if out, err := c.run(ctx, 15*time.Minute, "up", "-d", "--build"); err != nil {
 		t.Fatalf("docker compose up: %v\n%s", err, out)
 	}
-	c.wireExitNodeRouting()
+	c.wireNodeRouting()
 	return c
 }
 
-// wireExitNodeRouting gives the exit node a route to the destination network
+// wireNodeRouting gives the node under test a route to the destination network
 // via the router, then releases its entrypoint.
 //
-// The route is added from a throwaway container sharing the exit node's
-// network namespace, rather than by the exit node itself, so that the exit
-// node container keeps no capabilities of its own. That is the point: this
-// design needs no privileges.
-func (c *compose) wireExitNodeRouting() {
+// The route is added from a throwaway container sharing that node's network
+// namespace, rather than by the node itself, so the container keeps no
+// capabilities of its own. That is the point: this design needs no privileges.
+func (c *compose) wireNodeRouting() {
 	c.t.Helper()
-	name, err := c.containerName("exitnode")
+	name, err := c.containerName("minitail")
 	if err != nil {
-		c.t.Fatalf("finding the exit node container: %v", err)
+		c.t.Fatalf("finding the minitail container: %v", err)
 	}
 	out, err := exec.Command("docker", "run", "--rm",
 		"--network=container:"+name, "--cap-add=NET_ADMIN", "alpine:3.20",
@@ -102,7 +111,7 @@ func (c *compose) wireExitNodeRouting() {
 	if err != nil {
 		c.t.Fatalf("adding the route to %s: %v\n%s", destNetwork, err, out)
 	}
-	c.mustExec("exitnode", "touch", "/baseline/ready")
+	c.mustExec("minitail", "touch", "/baseline/ready")
 }
 
 // containerName resolves a compose service to its container name.
@@ -156,13 +165,13 @@ func (c *compose) mustExec(service string, args ...string) string {
 
 func (c *compose) dumpLogs() {
 	c.t.Helper()
-	for _, svc := range []string{"headscale", "exitnode", "client", "router"} {
+	for _, svc := range []string{"headscale", "minitail", "client", "router"} {
 		if out, err := c.run(context.Background(), time.Minute, "logs", "--tail=80", svc); err == nil {
 			c.t.Logf("=== %s logs ===\n%s", svc, out)
 		}
 	}
 	// minitail writes tailscaled's own output beside its state.
-	if out, err := c.exec("exitnode", "sh", "-c", "tail -n 120 /var/lib/minitail/tailscaled.log"); err == nil {
+	if out, err := c.exec("minitail", "sh", "-c", "tail -n 120 /var/lib/minitail/tailscaled.log"); err == nil {
 		c.t.Logf("=== tailscaled log ===\n%s", out)
 	}
 }

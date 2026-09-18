@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -70,7 +71,7 @@ func (f *fakeTailscale) Up(context.Context) error {
 	return nil
 }
 
-func (f *fakeTailscale) SetExitNode(context.Context) error {
+func (f *fakeTailscale) Apply(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sets++
@@ -135,7 +136,12 @@ func newHarness(t *testing.T) *harness {
 	h := &harness{dae: &fakeDaemon{}, ts: &fakeTailscale{}, rec: &recorder{}}
 	cfg := config.Default()
 	cfg.PollInterval = time.Millisecond
-	cfg.Hostname = "workbook-exit"
+	// The controller reads only the advertised routes out of the config.
+	f, err := config.ParseFile("[up]\n--advertise-routes=10.0.0.0/8\n")
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	cfg.File = f
 	h.ctrl = app.NewController(app.Options{
 		Config:    cfg,
 		Daemon:    h.dae,
@@ -194,7 +200,7 @@ func TestControllerOpensAuthURLOnce(t *testing.T) {
 }
 
 // TestControllerReAssertsAdvertisement covers the case where tailscaled comes
-// back with stored preferences that predate the exit node advertisement.
+// back with stored preferences that predate the current config file.
 func TestControllerReAssertsAdvertisement(t *testing.T) {
 	h := newHarness(t)
 	h.ts.setStatus(loadFixture(t, "running-not-approved"))
@@ -209,7 +215,7 @@ func TestControllerReAssertsAdvertisement(t *testing.T) {
 
 	_, sets, _ := h.ts.counts()
 	if sets != 1 {
-		t.Errorf("SetExitNode called %d times, want exactly 1 per daemon generation", sets)
+		t.Errorf("Apply called %d times, want exactly 1 per daemon generation", sets)
 	}
 	notifs, _ := h.rec.snapshot()
 	if len(notifs) != 1 {
@@ -217,12 +223,12 @@ func TestControllerReAssertsAdvertisement(t *testing.T) {
 	}
 }
 
-func TestControllerReachesExitNodeState(t *testing.T) {
+func TestControllerReachesServingState(t *testing.T) {
 	h := newHarness(t)
-	h.ts.setStatus(loadFixture(t, "running-exit-node"))
+	h.ts.setStatus(loadFixture(t, "running-approved"))
 
-	v := h.runUntil(t, "exit-node", func(v app.View) bool {
-		return v.State == app.StateExitNode
+	v := h.runUntil(t, "serving", func(v app.View) bool {
+		return v.State == app.StateServing
 	})
 	if !v.Userspace {
 		t.Error("expected the view to report userspace networking")
@@ -230,9 +236,12 @@ func TestControllerReachesExitNodeState(t *testing.T) {
 	if v.TailnetIP != "100.101.102.103" {
 		t.Errorf("TailnetIP = %q", v.TailnetIP)
 	}
+	if !slices.Equal(v.Routes, []string{"10.0.0.0/8"}) {
+		t.Errorf("Routes = %v, want the configured route", v.Routes)
+	}
 	notifs, _ := h.rec.snapshot()
 	if len(notifs) != 1 {
-		t.Errorf("notifications = %v, want one 'exit node active'", notifs)
+		t.Errorf("notifications = %v, want one 'routing' notice", notifs)
 	}
 }
 
@@ -264,23 +273,23 @@ func TestControllerRecoversFromNotApproved(t *testing.T) {
 	}
 
 	waitFor(app.StateNotApproved)
-	h.ts.setStatus(loadFixture(t, "running-exit-node"))
-	waitFor(app.StateExitNode)
+	h.ts.setStatus(loadFixture(t, "running-approved"))
+	waitFor(app.StateServing)
 }
 
 func TestControllerStopIsSticky(t *testing.T) {
 	h := newHarness(t)
-	h.ts.setStatus(loadFixture(t, "running-exit-node"))
+	h.ts.setStatus(loadFixture(t, "running-approved"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go h.ctrl.Run(ctx)
 
 	deadline := time.After(5 * time.Second)
-	for h.ctrl.View().State != app.StateExitNode {
+	for h.ctrl.View().State != app.StateServing {
 		select {
 		case <-deadline:
-			t.Fatal("never reached exit-node state")
+			t.Fatal("never reached the serving state")
 		case <-time.After(time.Millisecond):
 		}
 	}
@@ -300,7 +309,7 @@ func TestControllerStopIsSticky(t *testing.T) {
 
 func TestControllerReauthenticate(t *testing.T) {
 	h := newHarness(t)
-	h.ts.setStatus(loadFixture(t, "running-exit-node"))
+	h.ts.setStatus(loadFixture(t, "running-approved"))
 	if err := h.ctrl.Reauthenticate(context.Background()); err != nil {
 		t.Fatalf("Reauthenticate: %v", err)
 	}

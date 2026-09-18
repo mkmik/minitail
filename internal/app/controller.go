@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,10 +69,10 @@ type Controller struct {
 	// openedAuthURL is the last auth URL sent to the browser, so a pending
 	// login does not reopen a tab on every poll.
 	openedAuthURL string
-	// advertisedFor is the restart generation for which the exit node
-	// advertisement has already been re-applied.
-	advertisedFor int
-	upInFlight    bool
+	// appliedFor is the restart generation for which the configured
+	// preferences have already been re-applied.
+	appliedFor int
+	upInFlight bool
 
 	poke chan struct{}
 }
@@ -87,10 +89,10 @@ func NewController(opts Options) *Controller {
 		opts.Opener = OpenFunc(func(string) error { return nil })
 	}
 	c := &Controller{
-		opts:          opts,
-		subs:          map[int]chan View{},
-		advertisedFor: -1,
-		poke:          make(chan struct{}, 1),
+		opts:       opts,
+		subs:       map[int]chan View{},
+		appliedFor: -1,
+		poke:       make(chan struct{}, 1),
 	}
 	c.view = Derive(c.input())
 	return c
@@ -147,7 +149,7 @@ func (c *Controller) Start(ctx context.Context) {
 	c.mu.Lock()
 	already := c.want
 	c.want = true
-	c.advertisedFor = -1
+	c.appliedFor = -1
 	c.openedAuthURL = ""
 	c.mu.Unlock()
 	if !already {
@@ -177,7 +179,7 @@ func (c *Controller) Reauthenticate(ctx context.Context) error {
 	}
 	c.mu.Lock()
 	c.openedAuthURL = ""
-	c.advertisedFor = -1
+	c.appliedFor = -1
 	c.mu.Unlock()
 	c.Poke()
 	return nil
@@ -219,10 +221,18 @@ func (c *Controller) input() Input {
 	want, status, statusErr := c.want, c.status, c.statusErr
 	c.mu.Unlock()
 
+	advertised, err := c.opts.Config.File.AdvertisedRoutes()
+	if err != nil {
+		// A malformed --advertise-routes is worth saying out loud, but it
+		// must not stop the rest of the status from rendering.
+		c.opts.Logf("reading advertised routes from the config file: %v", err)
+	}
+
 	in := Input{
 		WantRunning: want,
 		Status:      status,
 		StatusErr:   statusErr,
+		Advertised:  advertised,
 	}
 	if c.opts.Daemon != nil {
 		in.DaemonRunning = c.opts.Daemon.Running()
@@ -234,9 +244,6 @@ func (c *Controller) input() Input {
 // refresh recomputes the view and publishes it if it changed.
 func (c *Controller) refresh() View {
 	v := Derive(c.input())
-	if v.Hostname == "" {
-		v.Hostname = c.opts.Config.Hostname
-	}
 
 	c.mu.Lock()
 	changed := !sameView(c.view, v)
@@ -286,20 +293,21 @@ func (c *Controller) react(ctx context.Context, prev, cur View) {
 		c.startLogin(ctx)
 
 	case StateNotApproved:
-		c.ensureAdvertised(ctx)
+		c.applyPrefs(ctx)
 		if prev.State != StateNotApproved {
 			c.notify("minitail: approval needed",
-				"This node is connected but its exit node advertisement is not approved yet. Approve it in the Tailscale admin console.")
+				"Connected, but "+strings.Join(cur.PendingRoutes, ", ")+
+					" still needs approval in the Tailscale admin console.")
 		}
 
-	case StateExitNode:
-		c.ensureAdvertised(ctx)
-		if prev.State != StateExitNode {
-			body := "This Mac is now serving as a Tailscale exit node."
-			if cur.TailnetIP != "" {
-				body = "This Mac is now serving as a Tailscale exit node (" + cur.TailnetIP + ")."
+	case StateServing:
+		c.applyPrefs(ctx)
+		if prev.State != StateServing {
+			body := cur.Detail
+			if body == "" {
+				body = "This Mac is now serving its tailnet."
 			}
-			c.notify("minitail: exit node active", body)
+			c.notify("minitail: "+strings.ToLower(cur.Summary), body)
 		}
 
 	case StateError:
@@ -332,23 +340,23 @@ func (c *Controller) startLogin(ctx context.Context) {
 	}()
 }
 
-// ensureAdvertised re-applies the exit node advertisement once per tailscaled
-// generation. Stored preferences from an earlier run may predate it, in which
-// case the node would come up connected but advertising nothing.
-func (c *Controller) ensureAdvertised(ctx context.Context) {
+// applyPrefs re-applies the configured preferences once per tailscaled
+// generation. tailscaled persists preferences, so a node logged in before the
+// config file was edited would otherwise come back advertising the old routes.
+func (c *Controller) applyPrefs(ctx context.Context) {
 	restarts, _, _ := c.opts.Daemon.Stats()
 	c.mu.Lock()
-	if c.advertisedFor == restarts {
+	if c.appliedFor == restarts {
 		c.mu.Unlock()
 		return
 	}
-	c.advertisedFor = restarts
+	c.appliedFor = restarts
 	c.mu.Unlock()
 
-	if err := c.opts.Tailscale.SetExitNode(ctx); err != nil {
-		c.opts.Logf("re-asserting exit node advertisement: %v", err)
+	if err := c.opts.Tailscale.Apply(ctx); err != nil {
+		c.opts.Logf("applying the configured preferences: %v", err)
 		c.mu.Lock()
-		c.advertisedFor = -1 // retry on the next poll
+		c.appliedFor = -1 // retry on the next poll
 		c.mu.Unlock()
 	}
 }
@@ -365,16 +373,12 @@ func sameView(a, b View) bool {
 		a.AuthURL != b.AuthURL || a.TailnetIP != b.TailnetIP ||
 		a.TailnetName != b.TailnetName || a.Hostname != b.Hostname ||
 		a.Userspace != b.Userspace || a.Restarts != b.Restarts ||
-		a.CanStart != b.CanStart || a.CanStop != b.CanStop ||
-		len(a.Health) != len(b.Health) {
+		a.CanStart != b.CanStart || a.CanStop != b.CanStop {
 		return false
 	}
-	for i := range a.Health {
-		if a.Health[i] != b.Health[i] {
-			return false
-		}
-	}
-	return true
+	return slices.Equal(a.Health, b.Health) &&
+		slices.Equal(a.Routes, b.Routes) &&
+		slices.Equal(a.PendingRoutes, b.PendingRoutes)
 }
 
 // compile-time check that the real supervisor satisfies Daemon.

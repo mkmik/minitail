@@ -1,5 +1,10 @@
-// Package config holds the paths and flags that keep this daemon isolated
-// from any system-wide Tailscale installation.
+// Package config locates minitail's per-user directory and reads the config
+// file that holds the flags it passes to tailscaled and to `tailscale up`.
+//
+// minitail deliberately has no UI for Tailscale's own options: the config file
+// is the interface. The only flags minitail supplies itself are --statedir and
+// --socket, which are what keep this instance isolated from any system-wide
+// Tailscale install.
 package config
 
 import (
@@ -8,87 +13,68 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
-// DefaultPort is the UDP port tailscaled listens on for WireGuard traffic.
-// It is deliberately not tailscaled's own default (41641) so that this daemon
-// can run alongside a system Tailscale install without colliding.
-const DefaultPort = 41642
+// FileName is the config file's name inside the minitail directory.
+const FileName = "minitail.conf"
 
 // Config is the fully resolved runtime configuration.
 type Config struct {
-	// StateDir is the tailscaled --statedir. Note this is a directory, not a
-	// state file; tailscaled stores tailscaled.state and its certs inside it.
+	// Dir is minitail's per-user directory: the config file, the control
+	// socket, tailscaled's state and its log all live here.
+	Dir string
+
+	// Path is the config file.
+	Path string
+
+	// StateDir is tailscaled's --statedir. Managed by minitail.
 	StateDir string
 
-	// TailscaledSocket is the tailscaled --socket path. Every `tailscale` CLI
-	// invocation must be pointed at it explicitly.
-	TailscaledSocket string
+	// Socket is tailscaled's --socket, and the one the tailscale CLI is
+	// pointed at. Managed by minitail.
+	Socket string
 
-	// ControlSocket is minitail's own status socket, used by `minitail status`
-	// to query a running supervisor.
+	// ControlSocket is minitail's own status socket, used by
+	// `minitail status`.
 	ControlSocket string
 
-	// Port is the tailscaled --port UDP port.
-	Port int
-
-	// Hostname is the name this node registers under.
-	Hostname string
+	// TailscaledLog receives the supervised daemon's output.
+	TailscaledLog string
 
 	// TailscaledPath and TailscalePath locate the open source Tailscale
 	// binaries (Homebrew's `tailscale` formula ships both).
 	TailscaledPath string
 	TailscalePath  string
 
-	// ControlURL, when set, overrides the Tailscale coordination server.
-	// Used by the integration tests to point at Headscale.
-	ControlURL string
-
-	// AuthKey, when set, makes the first login non-interactive.
-	AuthKey string
-
-	// AdvertiseRoutes are extra subnets to advertise as a subnet router,
-	// beyond the exit node advertisement. Empty by default.
-	//
-	// This exists because a Tailscale exit node deliberately refuses to
-	// forward traffic to subnets that are configured directly on one of its
-	// own interfaces (the "guest wifi" rule in ipnlocal.shrinkDefaultRoute):
-	// peers get internet access, not LAN access. Networks reached through a
-	// gateway are unaffected. Container runtimes such as OrbStack attach
-	// their bridges directly to the host, so reaching those container IPs
-	// through this node requires naming their subnets here.
-	AdvertiseRoutes string
-
 	// PollInterval is how often the supervisor polls `tailscale status`.
 	PollInterval time.Duration
 
-	// Verbose enables tailscaled's verbose logging.
-	Verbose bool
+	// File holds what was read from the config file.
+	File File
 }
 
-// Default returns a Config with the user-settable fields filled in. The socket
-// paths and the binary locations are derived by Resolve, which every caller
-// runs after flag parsing.
+// Default returns a Config with the directory resolved but nothing loaded.
 func Default() Config {
-	host, _ := os.Hostname()
-	if host == "" {
-		host = "mac"
-	}
+	dir := defaultDir()
 	return Config{
-		StateDir:     defaultStateDir(),
-		Port:         DefaultPort,
-		Hostname:     host + "-exit",
-		PollInterval: 2 * time.Second,
+		Dir:           dir,
+		Path:          filepath.Join(dir, FileName),
+		StateDir:      filepath.Join(dir, "tailscaled"),
+		Socket:        filepath.Join(dir, "tailscaled.sock"),
+		ControlSocket: filepath.Join(dir, "minitail.sock"),
+		TailscaledLog: filepath.Join(dir, "tailscaled.log"),
+		PollInterval:  2 * time.Second,
 	}
 }
 
-func defaultStateDir() string {
-	if d := os.Getenv("MINITAIL_STATE_DIR"); d != "" {
+func defaultDir() string {
+	if d := os.Getenv("MINITAIL_DIR"); d != "" {
 		return d
 	}
-	// The PRD calls for ~/.config/minitail rather than macOS's
-	// ~/Library/Application Support, so this does not use os.UserConfigDir.
+	// ~/.config rather than macOS's ~/Library/Application Support, so the
+	// config file is somewhere a person editing dotfiles expects it.
 	base := os.Getenv("XDG_CONFIG_HOME")
 	if base == "" {
 		home, err := os.UserHomeDir()
@@ -100,20 +86,13 @@ func defaultStateDir() string {
 	return filepath.Join(base, "minitail")
 }
 
-// RegisterFlags binds the user-settable subset of Config to fs.
+// RegisterFlags binds minitail's own options to fs. Tailscale's options live
+// in the config file, not here.
 func (c *Config) RegisterFlags(fs *flag.FlagSet) {
-	fs.StringVar(&c.StateDir, "state-dir", c.StateDir, "directory for this node's isolated tailscaled state")
-	fs.StringVar(&c.TailscaledSocket, "socket", "", "tailscaled LocalAPI socket path (default <state-dir>/tailscaled.sock)")
-	fs.IntVar(&c.Port, "port", c.Port, "UDP port for tailscaled WireGuard traffic")
-	fs.StringVar(&c.Hostname, "hostname", c.Hostname, "hostname to register in the tailnet")
+	fs.StringVar(&c.Dir, "dir", c.Dir, "minitail's directory: config file, control socket, tailscaled state and log")
 	fs.StringVar(&c.TailscaledPath, "tailscaled", "", "path to the tailscaled binary (default: found on PATH)")
 	fs.StringVar(&c.TailscalePath, "tailscale", "", "path to the tailscale CLI binary (default: found on PATH)")
-	fs.StringVar(&c.ControlURL, "control-url", "", "coordination server URL (default: Tailscale's)")
-	fs.StringVar(&c.AuthKey, "auth-key", "", "pre-authentication key for non-interactive login")
-	fs.StringVar(&c.AdvertiseRoutes, "advertise-routes", c.AdvertiseRoutes,
-		"comma-separated subnets to also advertise as a subnet router, for LANs attached directly to this machine (e.g. OrbStack bridges) that an exit node would otherwise not forward to")
 	fs.DurationVar(&c.PollInterval, "poll-interval", c.PollInterval, "how often to poll tailscaled for status")
-	fs.BoolVar(&c.Verbose, "verbose", c.Verbose, "enable verbose tailscaled logging")
 }
 
 // extraBinDirs are searched after PATH. A LaunchAgent starts with a minimal
@@ -125,37 +104,26 @@ var extraBinDirs = []string{
 	"/usr/sbin",
 }
 
-// Resolve fills in defaults that depend on other fields, looks up the
-// Tailscale binaries, and validates the result.
+// Resolve derives the paths that depend on Dir and looks up the Tailscale
+// binaries. It does not read the config file; call Load for that.
 //
 // The paths are derived before the binaries are looked up, so a caller that
 // only needs the socket paths (`minitail status`) can use them even when the
 // lookup fails because Tailscale is not installed.
 func (c *Config) Resolve() error {
-	if c.StateDir == "" {
-		return fmt.Errorf("state dir must not be empty")
+	if c.Dir == "" {
+		return fmt.Errorf("minitail directory must not be empty")
 	}
-	abs, err := filepath.Abs(c.StateDir)
+	abs, err := filepath.Abs(c.Dir)
 	if err != nil {
-		return fmt.Errorf("resolving state dir: %w", err)
+		return fmt.Errorf("resolving minitail directory: %w", err)
 	}
-	c.StateDir = abs
-	if c.TailscaledSocket == "" {
-		c.TailscaledSocket = filepath.Join(c.StateDir, "tailscaled.sock")
-	}
-	// Always derived from the state dir, never carried over: -state-dir has to
-	// move minitail's own control socket too, or `minitail status
-	// -state-dir=X` would query the default instance rather than X's.
-	c.ControlSocket = filepath.Join(c.StateDir, "minitail.sock")
-	if c.AuthKey == "" {
-		c.AuthKey = os.Getenv("MINITAIL_AUTH_KEY")
-	}
-	if c.ControlURL == "" {
-		c.ControlURL = os.Getenv("MINITAIL_CONTROL_URL")
-	}
-	if c.AdvertiseRoutes == "" {
-		c.AdvertiseRoutes = os.Getenv("MINITAIL_ADVERTISE_ROUTES")
-	}
+	c.Dir = abs
+	c.Path = filepath.Join(c.Dir, FileName)
+	c.StateDir = filepath.Join(c.Dir, "tailscaled")
+	c.Socket = filepath.Join(c.Dir, "tailscaled.sock")
+	c.ControlSocket = filepath.Join(c.Dir, "minitail.sock")
+	c.TailscaledLog = filepath.Join(c.Dir, "tailscaled.log")
 	if c.PollInterval <= 0 {
 		c.PollInterval = 2 * time.Second
 	}
@@ -172,10 +140,81 @@ func (c *Config) Resolve() error {
 	return nil
 }
 
-// EnsureStateDir creates the state directory with owner-only permissions.
-// tailscaled stores a private node key there.
-func (c *Config) EnsureStateDir() error {
+// EnsureDirs creates minitail's directory and tailscaled's state directory
+// with owner-only permissions. tailscaled stores a private node key there.
+func (c *Config) EnsureDirs() error {
+	if err := os.MkdirAll(c.Dir, 0o700); err != nil {
+		return err
+	}
 	return os.MkdirAll(c.StateDir, 0o700)
+}
+
+// Load reads the config file, seeding it with the default first if it does not
+// exist. It reports whether it created the file.
+func (c *Config) Load() (seeded bool, err error) {
+	if err := c.EnsureDirs(); err != nil {
+		return false, err
+	}
+	data, err := os.ReadFile(c.Path)
+	switch {
+	case err == nil:
+	case os.IsNotExist(err):
+		if err := os.WriteFile(c.Path, []byte(DefaultFile(hostname())), 0o600); err != nil {
+			return false, fmt.Errorf("seeding %s: %w", c.Path, err)
+		}
+		seeded = true
+		if data, err = os.ReadFile(c.Path); err != nil {
+			return seeded, err
+		}
+	default:
+		return false, err
+	}
+
+	f, err := ParseFile(string(data))
+	if err != nil {
+		return seeded, fmt.Errorf("%s: %w", c.Path, err)
+	}
+	c.File = f
+	return seeded, nil
+}
+
+// TailscaledArgs returns the argv for the supervised tailscaled process: the
+// two flags minitail manages, followed by whatever the config file asks for.
+func (c *Config) TailscaledArgs() []string {
+	args := []string{
+		"--statedir=" + c.StateDir,
+		"--socket=" + c.Socket,
+	}
+	return append(args, c.File.Tailscaled...)
+}
+
+// TailscaleArgs returns the argv for a `tailscale` CLI invocation, pointed at
+// this instance's socket.
+func (c *Config) TailscaleArgs(rest ...string) []string {
+	return append([]string{"--socket=" + c.Socket}, rest...)
+}
+
+// UpArgs returns the flags for `tailscale up` and `tailscale set`.
+func (c *Config) UpArgs() []string { return c.File.Up }
+
+func hostname() string {
+	h, _ := os.Hostname()
+	if h == "" {
+		return "mac"
+	}
+	// macOS hostnames are often "Name's MacBook Pro.local"; keep the first
+	// label and make it safe for a tailnet machine name.
+	h, _, _ = strings.Cut(h, ".")
+	var b strings.Builder
+	for _, r := range strings.ToLower(h) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 func lookPath(name string) (string, error) {
@@ -189,26 +228,4 @@ func lookPath(name string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("%q not found on PATH or in %v; install it with `brew install tailscale`", name, extraBinDirs)
-}
-
-// TailscaledArgs returns the argv for the supervised tailscaled process.
-//
-// --tun=userspace-networking is the whole point of this project: in that mode
-// tailscaled implements its network stack in-process with gVisor netstack and
-// never asks the OS for a TUN device, a route, or a DNS change.
-func (c *Config) TailscaledArgs() []string {
-	args := []string{
-		"--tun=userspace-networking",
-		"--statedir=" + c.StateDir,
-		"--socket=" + c.TailscaledSocket,
-		fmt.Sprintf("--port=%d", c.Port),
-		// No SOCKS5/HTTP proxy: egress is only for tailnet peers using this
-		// node as their exit node.
-		"--socks5-server=",
-		"--outbound-http-proxy-listen=",
-	}
-	if c.Verbose {
-		args = append(args, "--verbose=1")
-	}
-	return args
 }

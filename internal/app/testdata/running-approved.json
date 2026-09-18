@@ -1,7 +1,7 @@
 {
   "Version": "1.102.4-t8a1b2c3d4",
   "TUN": false,
-  "BackendState": "Starting",
+  "BackendState": "Running",
   "HaveNodeKey": true,
   "AuthURL": "",
   "TailscaleIPs": [
@@ -21,12 +21,13 @@
     ],
     "AllowedIPs": [
       "100.101.102.103/32",
-      "fd7a:115c:a1e0::1234:5678/128"
+      "fd7a:115c:a1e0::1234:5678/128",
+      "10.0.0.0/8"
     ],
     "Addrs": [],
     "CurAddr": "",
     "Relay": "",
-    "Online": false,
+    "Online": true,
     "ExitNode": false,
     "ExitNodeOption": false,
     "Active": false,
@@ -34,9 +35,7 @@
     "InMagicSock": true,
     "InEngine": true
   },
-  "Health": [
-    "Tailscale is starting. Please wait."
-  ],
+  "Health": [],
   "MagicDNSSuffix": "tail9f2c.ts.net",
   "CurrentTailnet": {
     "Name": "example.com",

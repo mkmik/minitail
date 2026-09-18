@@ -4,12 +4,14 @@
 package app
 
 import (
+	"net/netip"
+	"strconv"
 	"strings"
 
 	"github.com/mkmik/minitail/internal/tsctl"
 )
 
-// State is the coarse condition of the exit node, as shown by the menu bar icon.
+// State is the coarse condition of the node, as shown by the menu bar icon.
 type State string
 
 const (
@@ -25,18 +27,19 @@ const (
 	StateConnecting State = "connecting"
 	// StateDown means tailscaled is up but the node has been brought down.
 	StateDown State = "down"
-	// StateNotApproved means the node is connected and advertising itself as
-	// an exit node, but the advertisement has not been approved in the admin
-	// console, so no other device can select it.
+	// StateNotApproved means the node is connected and advertising routes,
+	// but the control plane has not approved all of them, so peers cannot use
+	// them yet.
 	StateNotApproved State = "not-approved"
-	// StateExitNode is the healthy state: connected and serving as an exit node.
-	StateExitNode State = "exit-node"
+	// StateServing is the healthy state: connected, with every advertised
+	// route approved.
+	StateServing State = "serving"
 	// StateError means tailscaled could not be started or kept running.
 	StateError State = "error"
 )
 
 // Healthy reports whether s is the fully working state.
-func (s State) Healthy() bool { return s == StateExitNode }
+func (s State) Healthy() bool { return s == StateServing }
 
 // NeedsAttention reports whether s is something the user has to act on.
 func (s State) NeedsAttention() bool {
@@ -64,6 +67,8 @@ type Input struct {
 	StatusErr error
 	// DaemonErr is the last error from the supervisor.
 	DaemonErr error
+	// Advertised are the routes the config file asks to advertise.
+	Advertised []netip.Prefix
 }
 
 // View is the rendered state: everything the menu bar needs, and nothing that
@@ -82,6 +87,10 @@ type View struct {
 	TailnetName string
 	// Hostname is the name this node registered under.
 	Hostname string
+	// Routes are the routes the config file advertises.
+	Routes []string
+	// PendingRoutes are those the control plane has not approved.
+	PendingRoutes []string
 	// Health carries tailscaled's own health warnings.
 	Health []string
 	// Userspace reports that tailscaled created no TUN device. It is false
@@ -94,13 +103,14 @@ type View struct {
 	CanStop  bool
 }
 
-// adminConsoleURL is where exit node advertisements are approved.
+// adminConsoleURL is where route advertisements are approved.
 const adminConsoleURL = "https://login.tailscale.com/admin/machines"
 
 // Derive maps an Input onto a View. It is pure: no I/O, no clock, no globals.
 func Derive(in Input) View {
 	v := View{
 		State:    StateStarting,
+		Routes:   prefixStrings(in.Advertised),
 		Restarts: in.Restarts,
 		CanStart: !in.WantRunning,
 		CanStop:  in.WantRunning,
@@ -121,7 +131,7 @@ func Derive(in Input) View {
 	case !in.WantRunning:
 		v.State = StateStopped
 		v.Summary = "Stopped"
-		v.Detail = "The exit node is not running."
+		v.Detail = "The subnet router is not running."
 		return v
 
 	case in.GivenUp:
@@ -172,19 +182,29 @@ func Derive(in Input) View {
 		v.Detail = "tailscaled is running but the node is down."
 
 	case tsctl.BackendRunning:
-		if st.ExitNodeApproved() {
-			v.State = StateExitNode
-			v.Summary = "Exit node active"
-			if v.TailnetIP != "" {
-				v.Detail = "Serving tailnet traffic as " + v.TailnetIP + "."
-			}
-		} else {
-			// The node is connected and advertising, but the control plane has
-			// not approved the advertisement. Without this branch the app would
-			// look healthy while no peer could actually select it.
+		pending := st.PendingRoutes(in.Advertised)
+		v.PendingRoutes = prefixStrings(pending)
+		switch {
+		case len(pending) > 0:
+			// Connected and advertising, but the control plane has not
+			// approved the routes. Without this branch the app would look
+			// healthy while no peer could reach anything through it.
 			v.State = StateNotApproved
-			v.Summary = "Exit node not approved"
-			v.Detail = "Connected, but the exit node advertisement still needs approval in the admin console."
+			v.Summary = summarizePending(pending)
+			v.Detail = "Connected, but " + countRoutes(len(pending)) +
+				" still awaiting approval in the admin console."
+		case len(in.Advertised) == 0:
+			// Nothing advertised: connected, but not doing minitail's job.
+			v.State = StateServing
+			v.Summary = "Connected"
+			v.Detail = "No routes advertised. Add --advertise-routes to the [up] section of the config file."
+		default:
+			v.State = StateServing
+			v.Summary = "Routing " + countRoutes(len(in.Advertised))
+			v.Detail = strings.Join(v.Routes, ", ")
+			if v.TailnetIP != "" {
+				v.Detail += " · " + v.TailnetIP
+			}
 		}
 
 	default:
@@ -204,6 +224,32 @@ func (v View) Title() string {
 		return "minitail"
 	}
 	return "minitail: " + v.Summary
+}
+
+// summarizePending names the routes when there are few enough to read.
+func summarizePending(pending []netip.Prefix) string {
+	if len(pending) <= 2 {
+		return strings.Join(prefixStrings(pending), ", ") + " awaiting approval"
+	}
+	return countRoutes(len(pending)) + " awaiting approval"
+}
+
+func countRoutes(n int) string {
+	if n == 1 {
+		return "1 route"
+	}
+	return strconv.Itoa(n) + " routes"
+}
+
+func prefixStrings(prefixes []netip.Prefix) []string {
+	if len(prefixes) == 0 {
+		return nil
+	}
+	out := make([]string, len(prefixes))
+	for i, p := range prefixes {
+		out[i] = p.String()
+	}
+	return out
 }
 
 func errDetail(prefix string, err error) string {

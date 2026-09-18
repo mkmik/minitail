@@ -32,7 +32,7 @@ func For(s app.State) []byte {
 		return attention
 	case app.StateNotApproved, app.StateDown:
 		return partial
-	case app.StateExitNode:
+	case app.StateServing:
 		return active
 	default:
 		return starting

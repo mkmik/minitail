@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"slices"
 )
 
 // Backend states reported by tailscaled in Status.BackendState. These mirror
@@ -52,9 +53,8 @@ type PeerStatus struct {
 	DNSName  string
 	Online   bool
 
-	// ExitNodeOption is tailscaled's own "offered && approved" signal: it is
-	// true only once the control plane has approved the exit node
-	// advertisement, so it doubles as the not-yet-approved detector.
+	// ExitNodeOption is tailscaled's own "offered && approved" signal for the
+	// default routes specifically.
 	ExitNodeOption bool
 
 	TailscaleIPs []netip.Addr
@@ -79,40 +79,28 @@ func ParseStatus(b []byte) (*Status, error) {
 	return &s, nil
 }
 
-// exitRoutes are the two prefixes a node must have approved to serve as an
-// exit node.
-var exitRoutes = []netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/0"),
-	netip.MustParsePrefix("::/0"),
-}
-
-// ExitNodeApproved reports whether the control plane has approved this node's
-// exit node advertisement.
+// PendingRoutes returns the advertised routes the control plane has not
+// approved yet.
 //
-// ExitNodeOption is the primary signal. AllowedIPs is checked as a fallback
-// for the (older) case where ExitNodeOption is not populated for the self
-// node; tailscaled derives ExitNodeOption from exactly these prefixes.
-func (s *Status) ExitNodeApproved() bool {
-	if s == nil || s.Self == nil {
-		return false
+// Approved routes show up in the self node's AllowedIPs, which is exactly what
+// tailscaled derives its own exit-node-approved signal from. Comparing the two
+// is what lets minitail distinguish "connected and serving" from "connected
+// but useless to every peer".
+func (s *Status) PendingRoutes(advertised []netip.Prefix) []netip.Prefix {
+	if len(advertised) == 0 {
+		return nil
 	}
-	if s.Self.ExitNodeOption {
-		return true
+	var approved []netip.Prefix
+	if s != nil && s.Self != nil {
+		approved = s.Self.AllowedIPs
 	}
-	return containsExitRoutes(s.Self.AllowedIPs)
-}
-
-func containsExitRoutes(prefixes []netip.Prefix) bool {
-	var v4, v6 bool
-	for _, p := range prefixes {
-		switch p {
-		case exitRoutes[0]:
-			v4 = true
-		case exitRoutes[1]:
-			v6 = true
+	var pending []netip.Prefix
+	for _, want := range advertised {
+		if !slices.Contains(approved, want) {
+			pending = append(pending, want)
 		}
 	}
-	return v4 && v6
+	return pending
 }
 
 // FirstIPv4 returns the node's 100.x tailnet address, if it has one.

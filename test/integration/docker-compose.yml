@@ -1,23 +1,26 @@
 # Topology for the minitail integration tests.
 #
-#   client ──[ts]── exitnode ──[transit]── router ── 192.0.2.40 (on its loopback)
-#              │
+#   client ──[ts]── minitail ──[transit]── router ── 192.0.2.40, 192.0.2.53
+#              │                                      (on its loopback)
 #          headscale
 #
-#   ts       172.28.0.0/24    headscale .10, exitnode .20, client .30
-#   transit  198.51.100.0/24  exitnode .20, router .2
-#   dest     192.0.2.40       an address the router owns, on no network at all
+#   ts       172.28.0.0/24    headscale .10, minitail .20, client .30
+#   transit  198.51.100.0/24  minitail .20, router .2
 #
-# The router serves the same HTTP content on both of its addresses, which makes
-# the pair of assertions a controlled comparison:
+# minitail advertises both 192.0.2.0/24 and 198.51.100.0/24 as subnet routes.
+# The router answers on an address in each, which makes the pair a controlled
+# comparison:
 #
-#   * 192.0.2.40 is reachable from the exit node only because of a static route
-#     in the exit node's own table, so reaching it proves egress follows the
+#   * 192.0.2.40 is reachable from the minitail node only because of a static
+#     route in that node's own table, so reaching it proves traffic follows the
 #     host routing table. `client` has no route to it whatsoever.
-#   * 198.51.100.2 is the same host, but on a subnet the exit node is directly
-#     attached to. A Tailscale exit node deliberately refuses to forward there
-#     (ipnlocal.shrinkDefaultRoute makes an exit node "guest wifi", not LAN
-#     access), so it must stay unreachable.
+#   * 198.51.100.2 is the same host on a LAN the minitail node is directly
+#     attached to. A subnet route serves it; an exit node would not, because
+#     ipnlocal.shrinkDefaultRoute makes an exit node "guest wifi" rather than
+#     LAN access. This is the case a container bridge falls into.
+#
+# 192.0.2.53 runs a DNS server, so queries to it travel through the subnet
+# route over UDP/53 — the path a split-DNS setup depends on.
 #
 # 192.0.2.0/24 is TEST-NET-1 and 198.51.100.0/24 is TEST-NET-2; neither is a
 # Docker network, which keeps Docker's own anti-spoofing rules out of the way.
@@ -29,9 +32,10 @@ services:
     command: serve
     volumes:
       - ./headscale.yaml:/etc/headscale/config.yaml:ro
-      # Tailnets need an explicit autogroup:internet grant before a client may
-      # egress through an exit node; without it the exit node's own filter
-      # drops the flow and replies with a TSMP rejection.
+      # A tailnet policy has to name the advertised subnets (and
+      # autogroup:internet for exit nodes) before a client may send traffic
+      # through the router; without it the router's own packet filter drops
+      # the flow and replies with a TSMP rejection.
       - ./headscale-policy.json:/etc/headscale/policy.json:ro
       - headscale-data:/var/lib/headscale
       - headscale-run:/var/run/headscale
@@ -39,8 +43,9 @@ services:
       ts:
         ipv4_address: 172.28.0.10
 
-  # An IP router that also hosts the destination. It reuses the node image
-  # because that is where busybox-extras (and therefore httpd) is installed.
+  # An IP router that also hosts the destination and the DNS server. It reuses
+  # the node image because that is where busybox-extras (httpd) and dnsmasq
+  # are installed.
   router:
     build: &node_image
       context: ../..
@@ -54,14 +59,14 @@ services:
       transit:
         ipv4_address: 198.51.100.2
 
-  exitnode:
+  minitail:
     build: *node_image
-    entrypoint: ["/usr/local/bin/exitnode-entrypoint.sh"]
-    # A stable hostname so the test can find this node in the control plane.
-    command: ["--hostname=minitail-exit"]
+    entrypoint: ["/usr/local/bin/minitail-entrypoint.sh"]
     environment:
-      MINITAIL_STATE_DIR: /var/lib/minitail
-      MINITAIL_CONTROL_URL: http://headscale:8080
+      # Everything else about this node, including which routes it advertises
+      # and which control server it uses, comes from the config file the
+      # entrypoint writes into this directory.
+      MINITAIL_DIR: /var/lib/minitail
       # The suite is hermetic: tailscaled must not try to reach Tailscale's
       # own logging service.
       TS_NO_LOGS_NO_SUPPORT: "true"

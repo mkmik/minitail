@@ -1,10 +1,13 @@
 // Command minitail supervises an isolated, userspace-networking tailscaled
-// whose only job is to serve as a Tailscale exit node, and surfaces its state
-// in the macOS menu bar.
+// that advertises subnet routes into a tailnet, and surfaces its state in the
+// macOS menu bar.
 //
 // It creates no network interface, installs no routes, and changes no DNS
-// configuration, so it can coexist with software that manages network state
-// aggressively (corporate VPNs, container runtimes).
+// configuration on this machine, so it can coexist with software that manages
+// network state aggressively (corporate VPNs, container runtimes).
+//
+// minitail has no user interface for Tailscale's own options: what it passes
+// to tailscaled and to `tailscale up` comes from a config file the user edits.
 package main
 
 import (
@@ -18,6 +21,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -48,6 +53,8 @@ func main() {
 		err = runCmd(rest)
 	case "status":
 		err = statusCmd(rest)
+	case "config":
+		err = configCmd(rest)
 	case "service":
 		err = serviceCmd(rest)
 	case "version", "--version", "-version":
@@ -64,17 +71,21 @@ func main() {
 }
 
 func usage(w *os.File) {
-	fmt.Fprint(w, `minitail - an isolated Tailscale exit node for macOS
+	fmt.Fprint(w, `minitail - an isolated Tailscale subnet router for macOS
 
 Usage:
   minitail run [flags]        supervise tailscaled and show the menu bar icon
   minitail status [flags]     print the current state
+  minitail config path        print the config file's location
+  minitail config init        create the config file if it does not exist
+  minitail config show        print the commands the config file produces
   minitail service install    install and load the login LaunchAgent
   minitail service uninstall  unload and remove the LaunchAgent
   minitail service status     report whether the LaunchAgent is loaded
   minitail version            print the version
 
-Run 'minitail run -h' for the full flag list.
+Tailscale's own options live in the config file, not in these flags.
+Run 'minitail run -h' for minitail's flags.
 `)
 }
 
@@ -91,12 +102,19 @@ func runCmd(args []string) error {
 	if err := cfg.Resolve(); err != nil {
 		return err
 	}
-	if err := cfg.EnsureStateDir(); err != nil {
-		return fmt.Errorf("creating state dir: %w", err)
+	seeded, err := cfg.Load()
+	if err != nil {
+		return err
+	}
+	if seeded {
+		log.Printf("wrote a default config to %s", cfg.Path)
+		log.Printf("it advertises a placeholder route; edit it and restart minitail")
 	}
 
-	log.Printf("state dir %s, socket %s, port %d", cfg.StateDir, cfg.TailscaledSocket, cfg.Port)
+	log.Printf("config %s", cfg.Path)
 	log.Printf("using %s and %s", cfg.TailscaledPath, cfg.TailscalePath)
+	log.Printf("tailscaled %s", strings.Join(cfg.TailscaledArgs(), " "))
+	log.Printf("tailscale up %s", strings.Join(cfg.UpArgs(), " "))
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -114,16 +132,15 @@ func runCmd(args []string) error {
 		ctrl.Run(ctx)
 		return nil
 	}
-	return runTray(ctx, cancel, ctrl)
+	return runTray(ctx, cancel, ctrl, cfg.Path)
 }
 
 // newController wires the supervisor, the tailscale client, and the desktop
 // integrations together.
 func newController(cfg config.Config) (*app.Controller, func()) {
-	logFile := filepath.Join(cfg.StateDir, "tailscaled.log")
-	out, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	out, err := os.OpenFile(cfg.TailscaledLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		log.Printf("cannot open %s, sending tailscaled output to stderr: %v", logFile, err)
+		log.Printf("cannot open %s, sending tailscaled output to stderr: %v", cfg.TailscaledLog, err)
 		out = os.Stderr
 	}
 
@@ -147,12 +164,10 @@ func newController(cfg config.Config) (*app.Controller, func()) {
 		Config: cfg,
 		Daemon: sup,
 		Tailscale: tsctl.New(tsctl.Options{
-			Binary:          cfg.TailscalePath,
-			Socket:          cfg.TailscaledSocket,
-			Hostname:        cfg.Hostname,
-			ControlURL:      cfg.ControlURL,
-			AuthKey:         cfg.AuthKey,
-			AdvertiseRoutes: cfg.AdvertiseRoutes,
+			Binary:     cfg.TailscalePath,
+			GlobalArgs: cfg.TailscaleArgs(),
+			UpArgs:     cfg.UpArgs(),
+			Logf:       log.Printf,
 		}),
 		Notifier: app.NotifyFunc(desktop.Notify),
 		Opener:   app.OpenFunc(desktop.Open),
@@ -179,6 +194,9 @@ func statusCmd(args []string) error {
 	// Resolving binaries is only needed for the fallback path, so a missing
 	// tailscale install must not stop `minitail status` from reporting.
 	resolveErr := cfg.Resolve()
+	if _, err := cfg.Load(); err != nil && resolveErr == nil {
+		resolveErr = err
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -206,6 +224,13 @@ func statusCmd(args []string) error {
 	if view.TailnetIP != "" {
 		fmt.Printf("%-12s %s\n", "address", view.TailnetIP)
 	}
+	for _, r := range view.Routes {
+		note := ""
+		if slices.Contains(view.PendingRoutes, r) {
+			note = "  (awaiting approval)"
+		}
+		fmt.Printf("%-12s %s%s\n", "route", r, note)
+	}
 	if view.AuthURL != "" {
 		fmt.Printf("%-12s %s\n", "login", view.AuthURL)
 	}
@@ -218,12 +243,70 @@ func statusCmd(args []string) error {
 // statusWithoutSupervisor derives a view straight from tailscaled, for when
 // minitail itself is not running.
 func statusWithoutSupervisor(ctx context.Context, cfg config.Config) (app.View, error) {
-	client := tsctl.New(tsctl.Options{Binary: cfg.TailscalePath, Socket: cfg.TailscaledSocket})
+	client := tsctl.New(tsctl.Options{Binary: cfg.TailscalePath, GlobalArgs: cfg.TailscaleArgs()})
 	st, err := client.Status(ctx)
 	if err != nil {
-		return app.View{}, fmt.Errorf("minitail is not running and tailscaled is not reachable on %s: %w", cfg.TailscaledSocket, err)
+		return app.View{}, fmt.Errorf("minitail is not running and tailscaled is not reachable on %s: %w", cfg.Socket, err)
 	}
-	return app.Derive(app.Input{WantRunning: true, DaemonRunning: true, Status: st}), nil
+	advertised, _ := cfg.File.AdvertisedRoutes()
+	return app.Derive(app.Input{
+		WantRunning:   true,
+		DaemonRunning: true,
+		Status:        st,
+		Advertised:    advertised,
+	}), nil
+}
+
+// configCmd exposes the config file, so that "where do I change the flags?"
+// has an answer that does not involve reading the source.
+func configCmd(args []string) error {
+	cfg := config.Default()
+	fs := flag.NewFlagSet("config", flag.ExitOnError)
+	cfg.RegisterFlags(fs)
+	sub := "show"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub, args = args[0], args[1:]
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	// The binaries are irrelevant here; only the paths matter.
+	_ = cfg.Resolve()
+
+	if sub == "path" {
+		fmt.Println(cfg.Path)
+		return nil
+	}
+
+	seeded, err := cfg.Load()
+	if err != nil {
+		return err
+	}
+	switch sub {
+	case "init":
+		if seeded {
+			fmt.Printf("created %s\n", cfg.Path)
+		} else {
+			fmt.Printf("%s already exists\n", cfg.Path)
+		}
+		return nil
+	case "show":
+		if seeded {
+			fmt.Printf("# created %s\n\n", cfg.Path)
+		}
+		fmt.Printf("tailscaled %s\n", strings.Join(cfg.TailscaledArgs(), " "))
+		fmt.Printf("tailscale %s\n", strings.Join(cfg.TailscaleArgs(append([]string{"up"}, cfg.UpArgs()...)...), " "))
+		routes, err := cfg.File.AdvertisedRoutes()
+		if err != nil {
+			return err
+		}
+		for _, r := range routes {
+			fmt.Printf("advertising %s\n", r)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown config command %q; expected path, init or show", sub)
+	}
 }
 
 func serviceCmd(args []string) error {

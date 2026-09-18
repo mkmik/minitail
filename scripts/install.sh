@@ -44,12 +44,17 @@ cat <<MSG
 
 minitail is running and will start again at login.
 
+  Tailscale's own flags live in a config file, not in minitail's:
+
+      $BIN_DIR/minitail config path
+
+  The seeded file advertises a placeholder route (10.0.0.0/8). Edit it and
+  restart minitail.
+
   Look for its icon in the menu bar. The first run opens a browser so you can
   log this node in to your tailnet; it then appears in the admin console as a
-  separate machine.
-
-  You must approve its exit node advertisement there before any other device
-  can select it:
+  separate machine, where you must approve its routes before any other device
+  can use them:
 
       https://login.tailscale.com/admin/machines
 

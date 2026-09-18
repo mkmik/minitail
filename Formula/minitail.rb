@@ -6,7 +6,7 @@
 #   brew install minitail
 #   brew services start minitail
 class Minitail < Formula
-  desc "Isolated Tailscale exit node for macOS that touches no routes or DNS"
+  desc "Isolated Tailscale subnet router for macOS that touches no routes or DNS"
   homepage "https://github.com/mkmik/minitail"
   license "MIT"
   # No tagged release yet, so this builds the tip of the default branch.
@@ -44,15 +44,22 @@ class Minitail < Formula
       This is a HEAD install, which `brew upgrade` skips by default. Update with:
         brew update && brew upgrade --fetch-HEAD minitail && brew services restart minitail
 
-      The first run opens a browser so you can log this node in to your tailnet.
-      It then appears in the admin console as a separate machine; you must
-      approve its exit node advertisement there before other devices can use it:
+      Tailscale's own flags live in a config file, not in minitail's:
+        minitail config path
+
+      The seeded file advertises a placeholder route (10.0.0.0/8). Edit it,
+      then restart. The first run opens a browser so you can log this node in
+      to your tailnet; it then appears in the admin console as a separate
+      machine, where you must approve its routes before peers can use them:
         https://login.tailscale.com/admin/machines
     EOS
   end
 
   test do
     assert_match version.to_s, shell_output("#{bin}/minitail version")
-    assert_match "isolated Tailscale exit node", shell_output("#{bin}/minitail help")
+    assert_match "subnet router", shell_output("#{bin}/minitail help")
+    # The config file is the interface, so it must be creatable unattended.
+    system bin/"minitail", "config", "init", "-dir", testpath/"cfg"
+    assert_match "--advertise-routes=10.0.0.0/8", (testpath/"cfg/minitail.conf").read
   end
 end

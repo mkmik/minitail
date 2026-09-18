@@ -1,8 +1,10 @@
 package tsctl_test
 
 import (
+	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/mkmik/minitail/internal/tsctl"
@@ -20,49 +22,64 @@ func TestParseStatusRejectsGarbage(t *testing.T) {
 // tailscaled adds fields, and minitail must not care.
 func TestParseStatusIgnoresUnknownFields(t *testing.T) {
 	in := `{"BackendState":"Running","SomethingBrandNew":{"a":1},"TUN":false,
-	        "Self":{"HostName":"x","ExitNodeOption":true,"FutureField":42}}`
+	        "Self":{"HostName":"x","AllowedIPs":["10.0.0.0/8"],"FutureField":42}}`
 	st, err := tsctl.ParseStatus([]byte(in))
 	if err != nil {
 		t.Fatalf("ParseStatus: %v", err)
 	}
-	if !st.ExitNodeApproved() {
-		t.Error("ExitNodeApproved() = false, want true")
+	if pending := st.PendingRoutes(prefixes("10.0.0.0/8")); len(pending) != 0 {
+		t.Errorf("PendingRoutes = %v, want none", pending)
 	}
 }
 
-// TestExitNodeApprovedFallsBackToAllowedIPs covers tailscaled builds that do
-// not populate ExitNodeOption for the self node: the approved exit routes
-// still show up in AllowedIPs, which is what ExitNodeOption is derived from.
-func TestExitNodeApprovedFallsBackToAllowedIPs(t *testing.T) {
+// TestPendingRoutes is the signal that separates "connected" from "connected
+// and actually usable by peers": a route counts only once the control plane
+// has put it in the self node's AllowedIPs.
+func TestPendingRoutes(t *testing.T) {
 	tests := []struct {
-		name string
-		json string
-		want bool
+		name       string
+		json       string
+		advertised []netip.Prefix
+		want       []netip.Prefix
 	}{
 		{
-			name: "both default routes approved",
-			json: `{"BackendState":"Running","Self":{"AllowedIPs":["100.1.2.3/32","0.0.0.0/0","::/0"]}}`,
-			want: true,
+			name:       "approved",
+			json:       `{"BackendState":"Running","Self":{"AllowedIPs":["100.1.2.3/32","10.0.0.0/8"]}}`,
+			advertised: prefixes("10.0.0.0/8"),
 		},
 		{
-			name: "only IPv4 approved",
-			json: `{"BackendState":"Running","Self":{"AllowedIPs":["100.1.2.3/32","0.0.0.0/0"]}}`,
-			want: false,
+			name:       "not approved",
+			json:       `{"BackendState":"Running","Self":{"AllowedIPs":["100.1.2.3/32"]}}`,
+			advertised: prefixes("10.0.0.0/8"),
+			want:       prefixes("10.0.0.0/8"),
 		},
 		{
-			name: "no routes approved",
-			json: `{"BackendState":"Running","Self":{"AllowedIPs":["100.1.2.3/32"]}}`,
-			want: false,
+			name:       "partially approved",
+			json:       `{"BackendState":"Running","Self":{"AllowedIPs":["100.1.2.3/32","10.0.0.0/8"]}}`,
+			advertised: prefixes("10.0.0.0/8", "192.168.7.0/24"),
+			want:       prefixes("192.168.7.0/24"),
 		},
 		{
-			name: "a subnet route is not an exit route",
-			json: `{"BackendState":"Running","Self":{"AllowedIPs":["10.0.0.0/8","192.168.0.0/16"]}}`,
-			want: false,
+			name:       "a wider approval does not cover a narrower advertisement",
+			json:       `{"BackendState":"Running","Self":{"AllowedIPs":["0.0.0.0/0"]}}`,
+			advertised: prefixes("10.0.0.0/8"),
+			want:       prefixes("10.0.0.0/8"),
 		},
 		{
-			name: "no self node",
-			json: `{"BackendState":"NeedsLogin"}`,
-			want: false,
+			name:       "exit node routes",
+			json:       `{"BackendState":"Running","Self":{"AllowedIPs":["0.0.0.0/0","::/0"]}}`,
+			advertised: prefixes("0.0.0.0/0", "::/0"),
+		},
+		{
+			name:       "nothing advertised",
+			json:       `{"BackendState":"Running","Self":{"AllowedIPs":["100.1.2.3/32"]}}`,
+			advertised: nil,
+		},
+		{
+			name:       "no self node yet",
+			json:       `{"BackendState":"NeedsLogin"}`,
+			advertised: prefixes("10.0.0.0/8"),
+			want:       prefixes("10.0.0.0/8"),
 		},
 	}
 	for _, tt := range tests {
@@ -71,11 +88,19 @@ func TestExitNodeApprovedFallsBackToAllowedIPs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseStatus: %v", err)
 			}
-			if got := st.ExitNodeApproved(); got != tt.want {
-				t.Errorf("ExitNodeApproved() = %v, want %v", got, tt.want)
+			if got := st.PendingRoutes(tt.advertised); !slices.Equal(got, tt.want) {
+				t.Errorf("PendingRoutes() = %v, want %v", got, tt.want)
 			}
 		})
 	}
+}
+
+func prefixes(ss ...string) []netip.Prefix {
+	out := make([]netip.Prefix, len(ss))
+	for i, s := range ss {
+		out[i] = netip.MustParsePrefix(s)
+	}
+	return out
 }
 
 func TestFirstIPv4(t *testing.T) {

@@ -14,7 +14,7 @@ RUN CGO_ENABLED=0 go build -tags nogui -trimpath -o /out/minitail ./cmd/minitail
 FROM alpine:3.20
 ARG TS_VERSION
 ARG TARGETARCH=amd64
-RUN apk add --no-cache ca-certificates curl iproute2 iptables iputils busybox-extras
+RUN apk add --no-cache ca-certificates curl iproute2 iptables iputils busybox-extras dnsmasq
 # The open source tailscaled and tailscale CLI, matching what Homebrew's
 # `tailscale` formula ships on macOS.
 RUN set -eu; \
@@ -24,8 +24,8 @@ RUN set -eu; \
     mv "/tmp/tailscale_${TS_VERSION}_${TARGETARCH}/tailscaled" /usr/local/bin/tailscaled; \
     rm -rf /tmp/ts.tgz "/tmp/tailscale_${TS_VERSION}_${TARGETARCH}"
 COPY --from=build /out/minitail /usr/local/bin/minitail
-COPY test/integration/exitnode-entrypoint.sh /usr/local/bin/exitnode-entrypoint.sh
+COPY test/integration/minitail-entrypoint.sh /usr/local/bin/minitail-entrypoint.sh
 COPY test/integration/client-entrypoint.sh /usr/local/bin/client-entrypoint.sh
 COPY test/integration/router-entrypoint.sh /usr/local/bin/router-entrypoint.sh
-RUN chmod +x /usr/local/bin/exitnode-entrypoint.sh /usr/local/bin/client-entrypoint.sh \
+RUN chmod +x /usr/local/bin/minitail-entrypoint.sh /usr/local/bin/client-entrypoint.sh \
     /usr/local/bin/router-entrypoint.sh

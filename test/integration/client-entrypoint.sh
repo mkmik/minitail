@@ -1,6 +1,6 @@
 #!/bin/sh
 # A plain kernel-mode tailscaled, standing in for another device on the tailnet
-# that wants to use minitail's node as its exit node.
+# that wants to reach networks through minitail's node.
 set -eu
 mkdir -p /var/lib/tsclient /var/run/tailscale
 exec tailscaled \

@@ -96,7 +96,7 @@ func TestSupervisorGivesUp(t *testing.T) {
 }
 
 // TestSupervisorRestartsAfterKill is the supervision property the menu bar
-// depends on: tailscaled dying must not leave the exit node down.
+// depends on: tailscaled dying must not leave the node down.
 func TestSupervisorRestartsAfterKill(t *testing.T) {
 	s := supervisor.New(supervisor.Options{
 		Path:    "/bin/sh",
