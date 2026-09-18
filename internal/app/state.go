@@ -67,6 +67,9 @@ type Input struct {
 	StatusErr error
 	// DaemonErr is the last error from the supervisor.
 	DaemonErr error
+	// ApplyErr is a failure to apply the config file: either tailscaled
+	// rejected a flag in it, or minitail could not parse it.
+	ApplyErr error
 	// Advertised are the routes the config file asks to advertise.
 	Advertised []netip.Prefix
 }
@@ -91,6 +94,9 @@ type View struct {
 	Routes []string
 	// PendingRoutes are those the control plane has not approved.
 	PendingRoutes []string
+	// ConfigErr describes a config file the node is not actually running,
+	// because a flag in it was rejected or it could not be parsed.
+	ConfigErr string
 	// Health carries tailscaled's own health warnings.
 	Health []string
 	// Userspace reports that tailscaled created no TUN device. It is false
@@ -114,6 +120,9 @@ func Derive(in Input) View {
 		Restarts: in.Restarts,
 		CanStart: !in.WantRunning,
 		CanStop:  in.WantRunning,
+	}
+	if in.ApplyErr != nil {
+		v.ConfigErr = strings.TrimSpace(in.ApplyErr.Error())
 	}
 	if st := in.Status; st != nil {
 		v.Userspace = !st.TUN
@@ -211,6 +220,13 @@ func Derive(in Input) View {
 		v.State = StateConnecting
 		v.Summary = "Connecting…"
 		v.Detail = "tailscaled reports an unknown state: " + st.BackendState
+	}
+
+	// A rejected config file means the running node does not match what the
+	// file says, which matters more than whatever else the detail line was
+	// about to explain.
+	if v.ConfigErr != "" {
+		v.Detail = "Config file not applied: " + v.ConfigErr
 	}
 	return v
 }

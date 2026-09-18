@@ -70,8 +70,13 @@ type Controller struct {
 	// login does not reopen a tab on every poll.
 	openedAuthURL string
 	// appliedFor is the restart generation for which the configured
-	// preferences have already been re-applied.
-	appliedFor int
+	// preferences have already been re-applied, and applyAttempts counts the
+	// tries within that generation.
+	appliedFor    int
+	applyAttempts int
+	// applyErr is the last failure to apply the config file, kept so it can
+	// be shown rather than only logged.
+	applyErr   error
 	upInFlight bool
 
 	poke chan struct{}
@@ -150,6 +155,8 @@ func (c *Controller) Start(ctx context.Context) {
 	already := c.want
 	c.want = true
 	c.appliedFor = -1
+	c.applyAttempts = 0
+	c.applyErr = nil
 	c.openedAuthURL = ""
 	c.mu.Unlock()
 	if !already {
@@ -218,7 +225,7 @@ func (c *Controller) pollOnce(ctx context.Context) {
 // input snapshots everything Derive needs. Caller must not hold c.mu.
 func (c *Controller) input() Input {
 	c.mu.Lock()
-	want, status, statusErr := c.want, c.status, c.statusErr
+	want, status, statusErr, applyErr := c.want, c.status, c.statusErr, c.applyErr
 	c.mu.Unlock()
 
 	advertised, err := c.opts.Config.File.AdvertisedRoutes()
@@ -232,7 +239,13 @@ func (c *Controller) input() Input {
 		WantRunning: want,
 		Status:      status,
 		StatusErr:   statusErr,
+		ApplyErr:    applyErr,
 		Advertised:  advertised,
+	}
+	if err != nil {
+		// A config file minitail cannot even read the routes out of is worth
+		// showing in the same place as one tailscaled rejected.
+		in.ApplyErr = err
 	}
 	if c.opts.Daemon != nil {
 		in.DaemonRunning = c.opts.Daemon.Running()
@@ -340,6 +353,12 @@ func (c *Controller) startLogin(ctx context.Context) {
 	}()
 }
 
+// maxApplyAttempts bounds the retries of `tailscale set` within one tailscaled
+// generation. A flag the daemon rejects is a mistake in the config file, and
+// retrying it every poll would only fill the log; after this many tries the
+// error is surfaced instead.
+const maxApplyAttempts = 3
+
 // applyPrefs re-applies the configured preferences once per tailscaled
 // generation. tailscaled persists preferences, so a node logged in before the
 // config file was edited would otherwise come back advertising the old routes.
@@ -353,12 +372,23 @@ func (c *Controller) applyPrefs(ctx context.Context) {
 	c.appliedFor = restarts
 	c.mu.Unlock()
 
-	if err := c.opts.Tailscale.Apply(ctx); err != nil {
-		c.opts.Logf("applying the configured preferences: %v", err)
-		c.mu.Lock()
-		c.appliedFor = -1 // retry on the next poll
-		c.mu.Unlock()
+	err := c.opts.Tailscale.Apply(ctx)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err == nil {
+		c.applyAttempts, c.applyErr = 0, nil
+		return
 	}
+	c.applyAttempts++
+	c.applyErr = err
+	c.opts.Logf("applying the config file: %v", err)
+	if c.applyAttempts < maxApplyAttempts {
+		c.appliedFor = -1 // retry on the next poll
+		return
+	}
+	c.opts.Logf("giving up on the config file after %d attempts; fix %s and restart",
+		c.applyAttempts, c.opts.Config.Path)
 }
 
 func (c *Controller) notify(title, body string) {
@@ -372,6 +402,7 @@ func sameView(a, b View) bool {
 	if a.State != b.State || a.Summary != b.Summary || a.Detail != b.Detail ||
 		a.AuthURL != b.AuthURL || a.TailnetIP != b.TailnetIP ||
 		a.TailnetName != b.TailnetName || a.Hostname != b.Hostname ||
+		a.ConfigErr != b.ConfigErr ||
 		a.Userspace != b.Userspace || a.Restarts != b.Restarts ||
 		a.CanStart != b.CanStart || a.CanStop != b.CanStop {
 		return false

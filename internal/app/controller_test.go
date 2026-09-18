@@ -2,7 +2,9 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -56,6 +58,7 @@ type fakeTailscale struct {
 	sets      int
 	logouts   int
 	statusErr error
+	applyErr  error
 }
 
 func (f *fakeTailscale) Status(context.Context) (*tsctl.Status, error) {
@@ -75,7 +78,13 @@ func (f *fakeTailscale) Apply(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sets++
-	return nil
+	return f.applyErr
+}
+
+func (f *fakeTailscale) failApply(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.applyErr = err
 }
 
 func (f *fakeTailscale) Logout(context.Context) error {
@@ -304,6 +313,28 @@ func TestControllerStopIsSticky(t *testing.T) {
 	}
 	if h.dae.Running() {
 		t.Error("expected the daemon to have been stopped")
+	}
+}
+
+// TestControllerSurfacesConfigErrors covers the most likely failure of a
+// hand-edited config file: a flag tailscaled rejects. It must be shown rather
+// than retried forever into the log.
+func TestControllerSurfacesConfigErrors(t *testing.T) {
+	h := newHarness(t)
+	h.ts.setStatus(loadFixture(t, "running-approved"))
+	h.ts.failApply(errors.New("flag provided but not defined: -nonsense"))
+
+	v := h.runUntil(t, "the config error to surface", func(v app.View) bool {
+		return v.ConfigErr != ""
+	})
+	if !strings.Contains(v.Detail, "not defined") {
+		t.Errorf("Detail = %q, want it to carry the rejected flag", v.Detail)
+	}
+
+	// Let many more polls go by than the retry budget allows.
+	time.Sleep(100 * time.Millisecond)
+	if _, sets, _ := h.ts.counts(); sets > 3 {
+		t.Errorf("Apply called %d times, want it to stop after the retry budget", sets)
 	}
 }
 
