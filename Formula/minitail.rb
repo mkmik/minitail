@@ -13,12 +13,12 @@ class Minitail < Formula
   license "MIT"
   head "https://github.com/mkmik/minitail.git"
 
+  depends_on :macos
   depends_on "go" => :build
   # The open source tailscaled and tailscale CLI. minitail supervises its own
   # tailscaled with a private state directory, socket and port, so this
   # coexists with the stock Tailscale app rather than replacing it.
   depends_on "tailscale"
-  depends_on :macos
 
   def install
     system "go", "build", *std_go_args(ldflags: "-s -w -X main.version=#{version}"), "./cmd/minitail"

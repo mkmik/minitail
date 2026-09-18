@@ -4,6 +4,7 @@ package integration
 
 import (
 	"encoding/json"
+	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
@@ -227,8 +228,13 @@ func TestExitNodeEndToEnd(t *testing.T) {
 		// what "netstack is a proxy, not a NAT" means in practice, and it is
 		// also why the exit node's routing table is what decides reachability.
 		seen := c.mustExec("client", "curl", "-s", "-m", "10", peerURL)
-		if seen != exitNodeTransitIP {
-			t.Errorf("destination saw source %q, want the exit node's own address %q", seen, exitNodeTransitIP)
+		got, err := parsePeerAddr(seen)
+		if err != nil {
+			t.Fatalf("destination reported an unparseable source address %q: %v", seen, err)
+		}
+		if got.String() != exitNodeTransitIP {
+			t.Errorf("destination saw source %s (reported as %q), want the exit node's own address %s",
+				got, seen, exitNodeTransitIP)
 		}
 	})
 
@@ -311,6 +317,20 @@ func assertUnchanged(t *testing.T, c *compose, what, baselineFile, command strin
 	if got != want {
 		t.Errorf("%s changed after starting the exit node:\n--- before ---\n%s\n--- after ---\n%s", what, want, got)
 	}
+}
+
+// parsePeerAddr normalises the address the destination reported. A dual-stack
+// listener reports an IPv4 peer in IPv4-mapped form ("[::ffff:198.51.100.20]"),
+// which is the same address written differently.
+func parsePeerAddr(s string) (netip.Addr, error) {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "[")
+	s = strings.TrimSuffix(s, "]")
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	return addr.Unmap(), nil
 }
 
 func hasExitRoutes(routes []string) bool {
