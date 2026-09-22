@@ -34,6 +34,9 @@ const (
 	// StateServing is the healthy state: connected, with every advertised
 	// route approved.
 	StateServing State = "serving"
+	// StateBadConfig means the node is up but not running the config file:
+	// a flag in it was rejected, or minitail could not parse it.
+	StateBadConfig State = "bad-config"
 	// StateError means tailscaled could not be started or kept running.
 	StateError State = "error"
 )
@@ -44,7 +47,7 @@ func (s State) Healthy() bool { return s == StateServing }
 // NeedsAttention reports whether s is something the user has to act on.
 func (s State) NeedsAttention() bool {
 	switch s {
-	case StateNeedsLogin, StateNeedsMachineAuth, StateNotApproved, StateError:
+	case StateNeedsLogin, StateNeedsMachineAuth, StateNotApproved, StateBadConfig, StateError:
 		return true
 	}
 	return false
@@ -121,9 +124,9 @@ func Derive(in Input) View {
 		CanStart: !in.WantRunning,
 		CanStop:  in.WantRunning,
 	}
-	if in.ApplyErr != nil {
-		v.ConfigErr = strings.TrimSpace(in.ApplyErr.Error())
-	}
+	// The CLI follows a rejected flag with its whole usage text; the first
+	// line is the one that says what is wrong.
+	v.ConfigErr, _, _ = strings.Cut(errDetail("", in.ApplyErr), "\n")
 	if st := in.Status; st != nil {
 		v.Userspace = !st.TUN
 		v.TailnetIP = st.FirstIPv4()
@@ -192,12 +195,18 @@ func Derive(in Input) View {
 
 	case tsctl.BackendRunning:
 		pending := st.PendingRoutes(in.Advertised)
-		v.PendingRoutes = prefixStrings(pending)
 		switch {
+		case v.ConfigErr != "":
+			// Up, but not running what the file says, so the app must not
+			// look healthy. Its routes cannot be judged either: ones the
+			// node never got would read as awaiting approval.
+			v.State = StateBadConfig
+			v.Summary = "Config file rejected"
 		case len(pending) > 0:
 			// Connected and advertising, but the control plane has not
 			// approved the routes. Without this branch the app would look
 			// healthy while no peer could reach anything through it.
+			v.PendingRoutes = prefixStrings(pending)
 			v.State = StateNotApproved
 			v.Summary = summarizePending(pending)
 			v.Detail = "Connected, but " + countRoutes(len(pending)) +

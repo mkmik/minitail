@@ -12,16 +12,10 @@ if [[ ! -x "$BIN" ]] && command -v minitail >/dev/null 2>&1; then
 	BIN="$(command -v minitail)"
 fi
 
-if [[ -x "$BIN" ]]; then
-	"$BIN" service uninstall || true
-else
-	echo "minitail binary not found; unloading the LaunchAgent directly."
-	launchctl bootout "gui/$(id -u)/com.github.mkmik.minitail" 2>/dev/null || true
-	rm -f "$HOME/Library/LaunchAgents/com.github.mkmik.minitail.plist"
-fi
-
-# Remove the node from the tailnet while its state still exists. Without this
-# it lingers in the admin console as an offline machine.
+# Remove the node from the tailnet while tailscaled is still running, which
+# means before the LaunchAgent is unloaded. Without this it lingers in the
+# admin console as an offline machine. minitail's polling loop would log the
+# node back in within a couple of seconds, so the unload follows immediately.
 socket="$MINITAIL_DIR/tailscaled.sock"
 if [[ -S "$socket" ]] && command -v tailscale >/dev/null 2>&1; then
 	echo "Logging this node out of the tailnet"
@@ -29,6 +23,14 @@ if [[ -S "$socket" ]] && command -v tailscale >/dev/null 2>&1; then
 else
 	echo "Note: tailscaled was not running, so the node could not be logged out."
 	echo "Delete it by hand at https://login.tailscale.com/admin/machines"
+fi
+
+if [[ -x "$BIN" ]]; then
+	"$BIN" service uninstall || true
+else
+	echo "minitail binary not found; unloading the LaunchAgent directly."
+	launchctl bootout "gui/$(id -u)/com.github.mkmik.minitail" 2>/dev/null || true
+	rm -f "$HOME/Library/LaunchAgents/com.github.mkmik.minitail.plist"
 fi
 
 if [[ -d "$MINITAIL_DIR" ]]; then

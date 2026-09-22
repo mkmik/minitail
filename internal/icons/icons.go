@@ -28,7 +28,7 @@ func For(s app.State) []byte {
 	switch s {
 	case app.StateStopped:
 		return stopped
-	case app.StateNeedsLogin, app.StateNeedsMachineAuth, app.StateError:
+	case app.StateNeedsLogin, app.StateNeedsMachineAuth, app.StateBadConfig, app.StateError:
 		return attention
 	case app.StateNotApproved, app.StateDown:
 		return partial

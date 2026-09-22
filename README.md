@@ -85,8 +85,8 @@ which point this instance at its own state and keep it separate from any
 system-wide Tailscale install. Setting either in the config file is an error
 rather than a silent override.
 
-After editing, restart: `brew services restart minitail`, or Stop then Start in
-the menu bar.
+After editing, restart minitail: `brew services restart minitail`. (Stop then
+Start in the menu bar restarts tailscaled, but does not reread the file.)
 
 ### First run, once
 

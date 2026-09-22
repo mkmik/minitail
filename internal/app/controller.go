@@ -1,7 +1,9 @@
 package app
 
 import (
+	"cmp"
 	"context"
+	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -58,6 +60,11 @@ type Options struct {
 type Controller struct {
 	opts Options
 
+	// advertised is what the config file asks to advertise, parsed once:
+	// the file does not change while minitail runs.
+	advertised    []netip.Prefix
+	advertisedErr error
+
 	mu        sync.Mutex
 	want      bool
 	status    *tsctl.Status
@@ -70,12 +77,10 @@ type Controller struct {
 	// login does not reopen a tab on every poll.
 	openedAuthURL string
 	// appliedFor is the restart generation for which the configured
-	// preferences have already been re-applied, and applyAttempts counts the
-	// tries within that generation.
-	appliedFor    int
-	applyAttempts int
-	// applyErr is the last failure to apply the config file, kept so it can
-	// be shown rather than only logged.
+	// preferences have already been re-applied.
+	appliedFor int
+	// applyErr is the last failure to apply the config file, by `tailscale
+	// set` or `tailscale up`, kept so it can be shown rather than only logged.
 	applyErr   error
 	upInFlight bool
 
@@ -98,6 +103,11 @@ func NewController(opts Options) *Controller {
 		subs:       map[int]chan View{},
 		appliedFor: -1,
 		poke:       make(chan struct{}, 1),
+	}
+	c.advertised, c.advertisedErr = opts.Config.File.AdvertisedRoutes()
+	if c.advertisedErr != nil {
+		// Said once here; the view keeps showing it.
+		opts.Logf("reading advertised routes from the config file: %v", c.advertisedErr)
 	}
 	c.view = Derive(c.input())
 	return c
@@ -131,7 +141,8 @@ func (c *Controller) Subscribe() (<-chan View, func()) {
 }
 
 // Run drives the controller until ctx is cancelled. It starts the daemon
-// immediately, which is what the LaunchAgent wants.
+// immediately, which is what the LaunchAgent wants, and shuts it down before
+// returning.
 func (c *Controller) Run(ctx context.Context) {
 	c.Start(ctx)
 	defer c.Stop()
@@ -155,7 +166,6 @@ func (c *Controller) Start(ctx context.Context) {
 	already := c.want
 	c.want = true
 	c.appliedFor = -1
-	c.applyAttempts = 0
 	c.applyErr = nil
 	c.openedAuthURL = ""
 	c.mu.Unlock()
@@ -170,7 +180,7 @@ func (c *Controller) Stop() {
 	c.mu.Lock()
 	already := !c.want
 	c.want = false
-	c.status, c.statusErr = nil, nil
+	c.status, c.statusErr, c.applyErr = nil, nil, nil
 	c.mu.Unlock()
 	if !already {
 		c.opts.Daemon.Stop()
@@ -187,6 +197,7 @@ func (c *Controller) Reauthenticate(ctx context.Context) error {
 	c.mu.Lock()
 	c.openedAuthURL = ""
 	c.appliedFor = -1
+	c.applyErr = nil
 	c.mu.Unlock()
 	c.Poke()
 	return nil
@@ -208,12 +219,13 @@ func (c *Controller) pollOnce(ctx context.Context) {
 
 	if want && c.opts.Daemon.Running() {
 		st, err := c.opts.Tailscale.Status(ctx)
-		c.mu.Lock()
 		if err != nil {
-			c.statusErr = err
-		} else {
-			c.status, c.statusErr = st, nil
+			// Drop the previous answer too: a daemon that has stopped
+			// answering must not keep showing as serving.
+			st = nil
 		}
+		c.mu.Lock()
+		c.status, c.statusErr = st, err
 		c.mu.Unlock()
 	}
 
@@ -225,28 +237,17 @@ func (c *Controller) pollOnce(ctx context.Context) {
 // input snapshots everything Derive needs. Caller must not hold c.mu.
 func (c *Controller) input() Input {
 	c.mu.Lock()
-	want, status, statusErr, applyErr := c.want, c.status, c.statusErr, c.applyErr
+	in := Input{
+		WantRunning: c.want,
+		Status:      c.status,
+		StatusErr:   c.statusErr,
+		// A file minitail cannot read the routes out of is shown in the
+		// same place as one tailscaled rejected.
+		ApplyErr:   cmp.Or(c.advertisedErr, c.applyErr),
+		Advertised: c.advertised,
+	}
 	c.mu.Unlock()
 
-	advertised, err := c.opts.Config.File.AdvertisedRoutes()
-	if err != nil {
-		// A malformed --advertise-routes is worth saying out loud, but it
-		// must not stop the rest of the status from rendering.
-		c.opts.Logf("reading advertised routes from the config file: %v", err)
-	}
-
-	in := Input{
-		WantRunning: want,
-		Status:      status,
-		StatusErr:   statusErr,
-		ApplyErr:    applyErr,
-		Advertised:  advertised,
-	}
-	if err != nil {
-		// A config file minitail cannot even read the routes out of is worth
-		// showing in the same place as one tailscaled rejected.
-		in.ApplyErr = err
-	}
 	if c.opts.Daemon != nil {
 		in.DaemonRunning = c.opts.Daemon.Running()
 		in.Restarts, in.GivenUp, in.DaemonErr = c.opts.Daemon.Stats()
@@ -259,17 +260,14 @@ func (c *Controller) refresh() View {
 	v := Derive(c.input())
 
 	c.mu.Lock()
-	changed := !sameView(c.view, v)
-	c.view = v
-	var subs []chan View
-	if changed {
-		for _, ch := range c.subs {
-			subs = append(subs, ch)
-		}
+	defer c.mu.Unlock()
+	if sameView(c.view, v) {
+		return v
 	}
-	c.mu.Unlock()
-
-	for _, ch := range subs {
+	c.view = v
+	// Delivered under the lock, so a subscriber cannot close its channel
+	// between this send and its unsubscribe. The send never blocks.
+	for _, ch := range c.subs {
 		select {
 		case ch <- v:
 		default: // a slow subscriber gets the next update instead
@@ -323,6 +321,12 @@ func (c *Controller) react(ctx context.Context, prev, cur View) {
 			c.notify("minitail: "+strings.ToLower(cur.Summary), body)
 		}
 
+	case StateBadConfig:
+		c.applyPrefs(ctx) // retried every poll, so a transient failure heals
+		if prev.State != StateBadConfig {
+			c.notify(cur.Title(), cur.Detail)
+		}
+
 	case StateError:
 		if prev.State != StateError {
 			c.notify("minitail: tailscaled failed", cur.Detail)
@@ -345,23 +349,32 @@ func (c *Controller) startLogin(ctx context.Context) {
 		err := c.opts.Tailscale.Up(ctx)
 		c.mu.Lock()
 		c.upInFlight = false
+		changed := errDetail("", err) != errDetail("", c.applyErr)
+		if ctx.Err() == nil {
+			c.applyErr = err
+		}
 		c.mu.Unlock()
-		if err != nil && ctx.Err() == nil {
+		switch {
+		case ctx.Err() != nil: // shutting down
+		case err == nil:
+			c.Poke() // show the logged-in state without waiting for the tick
+		case changed:
+			// Left to the next tick to retry: poking here would run `up` in
+			// a tight loop for as long as the file keeps a flag it rejects.
+			// Logged once per distinct error for the same reason.
 			c.opts.Logf("tailscale up: %v", err)
 		}
-		c.Poke()
 	}()
 }
-
-// maxApplyAttempts bounds the retries of `tailscale set` within one tailscaled
-// generation. A flag the daemon rejects is a mistake in the config file, and
-// retrying it every poll would only fill the log; after this many tries the
-// error is surfaced instead.
-const maxApplyAttempts = 3
 
 // applyPrefs re-applies the configured preferences once per tailscaled
 // generation. tailscaled persists preferences, so a node logged in before the
 // config file was edited would otherwise come back advertising the old routes.
+//
+// A failure is shown in the view and retried on the next poll, which is what
+// lets a transient one (the daemon not answering yet) heal by itself; it is
+// logged only when it changes, so a flag the daemon rejects does not fill the
+// log until the file is fixed.
 func (c *Controller) applyPrefs(ctx context.Context) {
 	restarts, _, _ := c.opts.Daemon.Stats()
 	c.mu.Lock()
@@ -375,20 +388,21 @@ func (c *Controller) applyPrefs(ctx context.Context) {
 	err := c.opts.Tailscale.Apply(ctx)
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err == nil {
-		c.applyAttempts, c.applyErr = 0, nil
+	if ctx.Err() != nil || !c.want || c.appliedFor != restarts {
+		// Shutting down, or Stop/Start ran meanwhile: the result belongs
+		// to a generation that is over.
+		c.mu.Unlock()
 		return
 	}
-	c.applyAttempts++
+	changed := errDetail("", err) != errDetail("", c.applyErr)
 	c.applyErr = err
-	c.opts.Logf("applying the config file: %v", err)
-	if c.applyAttempts < maxApplyAttempts {
+	if err != nil {
 		c.appliedFor = -1 // retry on the next poll
-		return
 	}
-	c.opts.Logf("giving up on the config file after %d attempts; fix %s and restart",
-		c.applyAttempts, c.opts.Config.Path)
+	c.mu.Unlock()
+	if err != nil && changed {
+		c.opts.Logf("applying %s: %v", c.opts.Config.Path, err)
+	}
 }
 
 func (c *Controller) notify(title, body string) {
