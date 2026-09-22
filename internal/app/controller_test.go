@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -58,6 +59,7 @@ type fakeTailscale struct {
 	sets      int
 	logouts   int
 	statusErr error
+	upErr     error
 	applyErr  error
 }
 
@@ -67,11 +69,23 @@ func (f *fakeTailscale) Status(context.Context) (*tsctl.Status, error) {
 	return f.status, f.statusErr
 }
 
-func (f *fakeTailscale) Up(context.Context) error {
+func (f *fakeTailscale) Up(ctx context.Context) error {
+	f.mu.Lock()
+	f.ups++
+	err := f.upErr
+	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	// A real `up` blocks until the user completes the login in the browser.
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (f *fakeTailscale) failUp(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.ups++
-	return nil
+	f.upErr = err
 }
 
 func (f *fakeTailscale) Apply(context.Context) error {
@@ -106,11 +120,12 @@ func (f *fakeTailscale) counts() (ups, sets, logouts int) {
 	return f.ups, f.sets, f.logouts
 }
 
-// recorder captures notifications and browser opens.
+// recorder captures notifications, browser opens and log lines.
 type recorder struct {
 	mu     sync.Mutex
 	notifs []string
 	opened []string
+	logs   []string
 }
 
 func (r *recorder) Notify(title, body string) error {
@@ -127,10 +142,29 @@ func (r *recorder) Open(url string) error {
 	return nil
 }
 
+func (r *recorder) Logf(format string, args ...any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.logs = append(r.logs, fmt.Sprintf(format, args...))
+}
+
 func (r *recorder) snapshot() (notifs, opened []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]string(nil), r.notifs...), append([]string(nil), r.opened...)
+	return slices.Clone(r.notifs), slices.Clone(r.opened)
+}
+
+// logCount returns how many log lines contain substr.
+func (r *recorder) logCount(substr string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, l := range r.logs {
+		if strings.Contains(l, substr) {
+			n++
+		}
+	}
+	return n
 }
 
 type harness struct {
@@ -157,28 +191,39 @@ func newHarness(t *testing.T) *harness {
 		Tailscale: h.ts,
 		Notifier:  app.NotifyFunc(h.rec.Notify),
 		Opener:    app.OpenFunc(h.rec.Open),
+		Logf:      h.rec.Logf,
 	})
 	return h
 }
 
-// runUntil drives the controller until cond holds or the deadline passes.
-func (h *harness) runUntil(t *testing.T, what string, cond func(app.View) bool) app.View {
+// run starts the polling loop for the rest of the test.
+func (h *harness) run(t *testing.T) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go h.ctrl.Run(ctx)
+	go h.ctrl.Run(t.Context())
+}
 
+// waitFor blocks until cond holds for the current view, or fails the test.
+func (h *harness) waitFor(t *testing.T, what string, cond func(app.View) bool) app.View {
+	t.Helper()
 	deadline := time.After(5 * time.Second)
 	for {
+		if v := h.ctrl.View(); cond(v) {
+			return v
+		}
 		select {
 		case <-deadline:
 			t.Fatalf("timed out waiting for %s; last view: %+v", what, h.ctrl.View())
 		case <-time.After(time.Millisecond):
-			if v := h.ctrl.View(); cond(v) {
-				return v
-			}
 		}
 	}
+}
+
+// runUntil starts the polling loop and waits for cond. The loop keeps running
+// after it returns, so a test can check what further polls do.
+func (h *harness) runUntil(t *testing.T, what string, cond func(app.View) bool) app.View {
+	t.Helper()
+	h.run(t)
+	return h.waitFor(t, what, cond)
 }
 
 // TestControllerOpensAuthURLOnce is the NeedsLogin transition: the URL must be
@@ -203,8 +248,34 @@ func TestControllerOpensAuthURLOnce(t *testing.T) {
 	if len(notifs) != 1 {
 		t.Errorf("notifications = %v, want exactly one", notifs)
 	}
-	if ups, _, _ := h.ts.counts(); ups == 0 {
-		t.Error("expected the controller to run `tailscale up` to request a login")
+	if ups, _, _ := h.ts.counts(); ups != 1 {
+		t.Errorf("Up called %d times, want exactly one `tailscale up` while it waits for the login", ups)
+	}
+}
+
+// TestControllerPacesFailingLogin: a flag `tailscale up` rejects must be shown
+// and retried at the poll interval, not in a tight loop, because unlike a
+// pending login a failed `up` returns at once.
+func TestControllerPacesFailingLogin(t *testing.T) {
+	h := newHarness(t)
+	h.ts.setStatus(loadFixture(t, "needs-login"))
+	h.ts.failUp(errors.New("flag provided but not defined: -nonsense"))
+
+	v := h.runUntil(t, "the up error to surface", func(v app.View) bool {
+		return v.ConfigErr != ""
+	})
+	if v.State != app.StateNeedsLogin || !strings.Contains(v.Detail, "not defined") {
+		t.Errorf("view = %+v, want needs-login with the rejected flag in Detail", v)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// At most one `up` per 1ms poll; a loop that pokes itself after every
+	// failure runs thousands in this time.
+	if ups, _, _ := h.ts.counts(); ups > 100 {
+		t.Errorf("Up called %d times in 50ms, want it paced by the poll interval", ups)
+	}
+	if n := h.rec.logCount("tailscale up:"); n != 1 {
+		t.Errorf("logged the failure %d times, want once", n)
 	}
 }
 
@@ -260,11 +331,9 @@ func TestControllerRecoversFromNotApproved(t *testing.T) {
 	h := newHarness(t)
 	h.ts.setStatus(loadFixture(t, "running-not-approved"))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	views, unsubscribe := h.ctrl.Subscribe()
 	defer unsubscribe()
-	go h.ctrl.Run(ctx)
+	h.run(t)
 
 	waitFor := func(want app.State) {
 		t.Helper()
@@ -290,18 +359,9 @@ func TestControllerStopIsSticky(t *testing.T) {
 	h := newHarness(t)
 	h.ts.setStatus(loadFixture(t, "running-approved"))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go h.ctrl.Run(ctx)
-
-	deadline := time.After(5 * time.Second)
-	for h.ctrl.View().State != app.StateServing {
-		select {
-		case <-deadline:
-			t.Fatal("never reached the serving state")
-		case <-time.After(time.Millisecond):
-		}
-	}
+	h.runUntil(t, "serving", func(v app.View) bool {
+		return v.State == app.StateServing
+	})
 
 	h.ctrl.Stop()
 	if got := h.ctrl.View().State; got != app.StateStopped {
@@ -318,30 +378,45 @@ func TestControllerStopIsSticky(t *testing.T) {
 
 // TestControllerSurfacesConfigErrors covers the most likely failure of a
 // hand-edited config file: a flag tailscaled rejects. It must be shown rather
-// than retried forever into the log.
+// than retried into the log. And because a daemon that is not answering yet
+// fails the same call, the failure must also heal once `set` works again.
 func TestControllerSurfacesConfigErrors(t *testing.T) {
 	h := newHarness(t)
 	h.ts.setStatus(loadFixture(t, "running-approved"))
 	h.ts.failApply(errors.New("flag provided but not defined: -nonsense"))
 
 	v := h.runUntil(t, "the config error to surface", func(v app.View) bool {
-		return v.ConfigErr != ""
+		return v.State == app.StateBadConfig
 	})
 	if !strings.Contains(v.Detail, "not defined") {
 		t.Errorf("Detail = %q, want it to carry the rejected flag", v.Detail)
 	}
-
-	// Let many more polls go by than the retry budget allows.
-	time.Sleep(100 * time.Millisecond)
-	if _, sets, _ := h.ts.counts(); sets > 3 {
-		t.Errorf("Apply called %d times, want it to stop after the retry budget", sets)
+	if v.PendingRoutes != nil {
+		t.Errorf("PendingRoutes = %v, want none: the node never got them", v.PendingRoutes)
 	}
+
+	// Many more polls, each retrying `set`, must add up to one log line.
+	time.Sleep(50 * time.Millisecond)
+	if _, sets, _ := h.ts.counts(); sets < 3 {
+		t.Errorf("Apply called %d times, want it retried on every poll", sets)
+	}
+	if n := h.rec.logCount("applying"); n != 1 {
+		t.Errorf("logged the failure %d times, want once", n)
+	}
+	if notifs, _ := h.rec.snapshot(); !slices.Contains(notifs, "minitail: Config file rejected") {
+		t.Errorf("notifications = %v, want one about the config file", notifs)
+	}
+
+	h.ts.failApply(nil)
+	h.waitFor(t, "recovery once `set` works", func(v app.View) bool {
+		return v.State == app.StateServing && v.ConfigErr == ""
+	})
 }
 
 func TestControllerReauthenticate(t *testing.T) {
 	h := newHarness(t)
 	h.ts.setStatus(loadFixture(t, "running-approved"))
-	if err := h.ctrl.Reauthenticate(context.Background()); err != nil {
+	if err := h.ctrl.Reauthenticate(t.Context()); err != nil {
 		t.Fatalf("Reauthenticate: %v", err)
 	}
 	if _, _, logouts := h.ts.counts(); logouts != 1 {

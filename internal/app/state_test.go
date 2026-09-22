@@ -141,6 +141,31 @@ func TestDerivePartialApproval(t *testing.T) {
 	}
 }
 
+// TestDeriveBadConfig: a rejected config file must not look healthy, and the
+// routes the node never got must not read as awaiting approval.
+func TestDeriveBadConfig(t *testing.T) {
+	st := loadFixture(t, "running-approved") // has 10.0.0.0/8 approved
+	both := []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("192.168.7.0/24"),
+	}
+	// What tsctl produces for a flag the CLI rejects: one line, then usage.
+	err := errors.New("tailscale set: exit status 2: flag provided but not defined: -nonsense\nUSAGE\n  set [flags]\n")
+	got := app.Derive(app.Input{WantRunning: true, DaemonRunning: true, Status: st, Advertised: both, ApplyErr: err})
+	if got.State != app.StateBadConfig || !got.State.NeedsAttention() {
+		t.Errorf("State = %q, want %q, needing attention", got.State, app.StateBadConfig)
+	}
+	if got.PendingRoutes != nil {
+		t.Errorf("PendingRoutes = %v, want none while the file is not applied", got.PendingRoutes)
+	}
+	if want := "tailscale set: exit status 2: flag provided but not defined: -nonsense"; got.ConfigErr != want {
+		t.Errorf("ConfigErr = %q, want the first line only: %q", got.ConfigErr, want)
+	}
+	if !strings.Contains(got.Detail, "-nonsense") || strings.Contains(got.Detail, "USAGE") {
+		t.Errorf("Detail = %q, want the error without the usage text", got.Detail)
+	}
+}
+
 // TestDeriveNoRoutesAdvertised: connected, but not doing minitail's job.
 func TestDeriveNoRoutesAdvertised(t *testing.T) {
 	st := loadFixture(t, "running-approved")

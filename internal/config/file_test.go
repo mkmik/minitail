@@ -45,6 +45,9 @@ func TestParseFileErrors(t *testing.T) {
 		{"managed socket", "[tailscaled]\n--socket=/tmp/x.sock\n", "managed by minitail"},
 		{"managed statedir", "[tailscaled]\n--statedir=/tmp/x\n", "managed by minitail"},
 		{"managed state", "[tailscaled]\n--state=/tmp/x.state\n", "managed by minitail"},
+		// Go's flag parser accepts a single dash too.
+		{"managed state, single dash", "[tailscaled]\n-state=/tmp/x.state\n", "managed by minitail"},
+		{"managed socket, two-token form", "[tailscaled]\n--socket\n/tmp/x.sock\n", "managed by minitail"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

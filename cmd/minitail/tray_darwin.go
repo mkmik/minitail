@@ -17,7 +17,9 @@ import (
 // clicks back to it. It is deliberately dumb: it holds no state of its own
 // and makes no decisions, so reading it is sufficient review.
 func runTray(ctx context.Context, cancel context.CancelFunc, ctrl *app.Controller, configPath string) error {
-	ctx, stopCtrl := context.WithCancel(ctx)
+	// Closed once Run has returned, which is after it shut tailscaled down.
+	// The process must not exit before that, or tailscaled outlives it.
+	done := make(chan struct{})
 
 	onReady := func() {
 		systray.SetTooltip("minitail")
@@ -106,7 +108,9 @@ func runTray(ctx context.Context, cancel context.CancelFunc, ctrl *app.Controlle
 						log.Printf("re-authenticating: %v", err)
 					}
 				case <-mQuit.ClickedCh:
-					systray.Quit()
+					// Run notices, stops tailscaled and then quits the tray
+					// (below). Quitting here would exit with it still up.
+					cancel()
 					return
 				}
 			}
@@ -114,13 +118,16 @@ func runTray(ctx context.Context, cancel context.CancelFunc, ctrl *app.Controlle
 
 		go func() {
 			ctrl.Run(ctx)
+			close(done)
 			systray.Quit()
 		}()
 	}
 
+	// Also reached when something other than the Quit item terminates the
+	// app; the wait gives tailscaled the same clean shutdown either way.
 	onExit := func() {
-		stopCtrl()
 		cancel()
+		<-done
 	}
 
 	systray.Run(onReady, onExit)

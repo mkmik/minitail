@@ -114,10 +114,17 @@ func runCmd(args []string) error {
 	log.Printf("config %s", cfg.Path)
 	log.Printf("using %s and %s", cfg.TailscaledPath, cfg.TailscalePath)
 	log.Printf("tailscaled %s", strings.Join(cfg.TailscaledArgs(), " "))
-	log.Printf("tailscale up %s", strings.Join(cfg.UpArgs(), " "))
+	log.Printf("tailscale up %s", strings.Join(tsctl.Redact(cfg.UpArgs()), " "))
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// A second minitail on the same directory would lose the fight over
+	// tailscaled's socket but win the one over the status socket, so that
+	// `minitail status` would describe the broken instance. Refuse instead.
+	if _, err := app.FetchStatus(ctx, cfg.ControlSocket); err == nil {
+		return fmt.Errorf("minitail is already running on %s", cfg.Dir)
+	}
 
 	ctrl, cleanup := newController(cfg)
 	defer cleanup()
@@ -248,12 +255,13 @@ func statusWithoutSupervisor(ctx context.Context, cfg config.Config) (app.View, 
 	if err != nil {
 		return app.View{}, fmt.Errorf("minitail is not running and tailscaled is not reachable on %s: %w", cfg.Socket, err)
 	}
-	advertised, _ := cfg.File.AdvertisedRoutes()
+	advertised, err := cfg.File.AdvertisedRoutes()
 	return app.Derive(app.Input{
 		WantRunning:   true,
 		DaemonRunning: true,
 		Status:        st,
 		Advertised:    advertised,
+		ApplyErr:      err,
 	}), nil
 }
 

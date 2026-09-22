@@ -17,8 +17,9 @@ type File struct {
 
 // managedFlags are supplied by minitail itself. Setting them in the config
 // file would break the isolation from a system Tailscale install that is the
-// whole point, so it is an error rather than a silent override.
-var managedFlags = []string{"--statedir", "--state", "--socket"}
+// whole point, so it is an error rather than a silent override. Names have no
+// dashes, because Go's flag parser takes "-state" as well as "--state".
+var managedFlags = []string{"statedir", "state", "socket"}
 
 // ParseFile reads minitail.conf.
 //
@@ -59,7 +60,8 @@ func ParseFile(text string) (File, error) {
 		if section == "tailscaled" {
 			// A value line cannot be a flag name, so checking every line is
 			// enough to catch both "--socket=x" and "--socket" then "x".
-			if name, _, _ := strings.Cut(line, "="); containsFold(managedFlags, name) {
+			name, _, _ := strings.Cut(line, "=")
+			if strings.HasPrefix(name, "-") && containsFold(managedFlags, strings.TrimLeft(name, "-")) {
 				return File{}, fmt.Errorf("line %d: %s is managed by minitail and must not be set here", lineno, name)
 			}
 			f.Tailscaled = append(f.Tailscaled, line)
@@ -146,7 +148,8 @@ func DefaultFile(hostname string) string {
 #
 #     brew services restart minitail
 #
-# or use Stop then Start in the menu bar.
+# (Stop then Start in the menu bar restarts tailscaled, but does not reread
+# this file.)
 
 [tailscaled]
 # Userspace networking is the point of minitail: tailscaled implements its

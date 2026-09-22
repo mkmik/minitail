@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 )
@@ -87,13 +88,7 @@ func (c *CLI) Up(ctx context.Context) error {
 func (c *CLI) Apply(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, c.opts.Timeout)
 	defer cancel()
-	// `tailscale set` rejects flags that only `up` understands, so anything
-	// it cannot take is dropped here rather than failing the whole call.
-	args := setArgs(c.opts.UpArgs)
-	if len(args) == 0 {
-		return nil
-	}
-	_, err := c.run(ctx, c.args(append([]string{"set"}, args...)...)...)
+	_, err := c.run(ctx, c.args(append([]string{"set"}, setArgs(c.opts.UpArgs)...)...)...)
 	return err
 }
 
@@ -105,27 +100,100 @@ func (c *CLI) Logout(ctx context.Context) error {
 	return err
 }
 
-// upOnlyFlags are accepted by `tailscale up` but not by `tailscale set`.
+// upOnlyFlags are accepted by `tailscale up` but rejected by `tailscale set`,
+// per cmd/tailscale/cli/{up,set}.go at v1.102.4. Names have no dashes, so the
+// "-flag" and "--flag" spellings both match.
 var upOnlyFlags = map[string]bool{
-	"--login-server": true,
-	"--auth-key":     true,
-	"--authkey":      true,
-	"--force-reauth": true,
-	"--reset":        true,
-	"--timeout":      true,
-	"--qr":           true,
-	"--json":         true,
+	"login-server":   true,
+	"auth-key":       true,
+	"authkey":        true, // the spelling before 1.40
+	"audience":       true,
+	"client-id":      true,
+	"client-secret":  true,
+	"id-token":       true,
+	"advertise-tags": true,
+	"host-routes":    true,
+	"force-reauth":   true,
+	"reset":          true,
+	"timeout":        true,
+	"qr":             true,
+	"qr-format":      true,
+	"json":           true,
 }
 
-// setArgs filters the configured up flags down to those `tailscale set` takes.
+// secretFlags carry credentials, which must not reach the log.
+var secretFlags = map[string]bool{
+	"auth-key":      true,
+	"authkey":       true,
+	"client-secret": true,
+	"id-token":      true,
+}
+
+// flagName returns the name of a flag argument without dashes or value, so
+// "--auth-key=x", "-auth-key=x" and "--auth-key" all give "auth-key". A value
+// argument gives "".
+func flagName(arg string) (name string, hasValue bool) {
+	if !strings.HasPrefix(arg, "-") {
+		return "", false
+	}
+	name, _, hasValue = strings.Cut(arg, "=")
+	return strings.TrimLeft(name, "-"), hasValue
+}
+
+// setArgs turns the configured up flags into the argv for `tailscale set`.
+//
+// Flags only `up` takes are dropped, together with a value given as its own
+// argument. The two advertisement flags are always passed, because `set`
+// changes only the preferences it is given: without an explicit value, a
+// route removed from the file would stay advertised by the node while the
+// view, which reads the file, says it is gone.
 func setArgs(up []string) []string {
 	var out []string
-	for _, a := range up {
-		name, _, _ := strings.Cut(a, "=")
-		if upOnlyFlags[name] {
+	routes, exitNode := false, false
+	for i := 0; i < len(up); i++ {
+		name, hasValue := flagName(up[i])
+		switch name {
+		case "advertise-routes":
+			routes = true
+		case "advertise-exit-node":
+			exitNode = true
+		}
+		if !upOnlyFlags[name] {
+			out = append(out, up[i])
 			continue
 		}
-		out = append(out, a)
+		// Neither command takes positional arguments, so a following
+		// argument that is not a flag can only be this flag's value.
+		if !hasValue && i+1 < len(up) && !strings.HasPrefix(up[i+1], "-") {
+			i++
+		}
+	}
+	if !routes {
+		out = append(out, "--advertise-routes=")
+	}
+	if !exitNode {
+		out = append(out, "--advertise-exit-node=false")
+	}
+	return out
+}
+
+// Redact replaces the value of every credential flag in args, so that a
+// command line can be logged.
+func Redact(args []string) []string {
+	out := slices.Clone(args)
+	for i := 0; i < len(out); i++ {
+		name, hasValue := flagName(out[i])
+		if !secretFlags[name] {
+			continue
+		}
+		switch {
+		case hasValue:
+			flag, _, _ := strings.Cut(out[i], "=")
+			out[i] = flag + "=<redacted>"
+		case i+1 < len(out) && !strings.HasPrefix(out[i+1], "-"):
+			i++
+			out[i] = "<redacted>"
+		}
 	}
 	return out
 }
@@ -135,7 +203,7 @@ func (c *CLI) run(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, c.opts.Binary, args...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	c.opts.Logf("running %s %s", c.opts.Binary, strings.Join(args, " "))
+	c.opts.Logf("running %s %s", c.opts.Binary, strings.Join(Redact(args), " "))
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
