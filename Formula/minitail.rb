@@ -9,10 +9,11 @@ class Minitail < Formula
   desc "Isolated Tailscale subnet router for macOS that touches no routes or DNS"
   homepage "https://github.com/mkmik/minitail"
   license "MIT"
-  # No tagged release yet, so this builds the tip of the default branch.
+  # No tagged release yet, so this builds the tip of main (named explicitly:
+  # Homebrew clones "master" when no branch is given).
   # Pushing a v* tag runs .github/workflows/release.yml, which adds a stable
   # url and sha256 here and makes `brew install` use the release instead.
-  head "https://github.com/mkmik/minitail.git"
+  head "https://github.com/mkmik/minitail.git", branch: "main"
 
   # "tailscale" is the open source tailscaled and CLI. minitail supervises its
   # own tailscaled with a private state directory, socket and port, so it
