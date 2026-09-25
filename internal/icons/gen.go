@@ -1,10 +1,12 @@
 //go:build ignore
 
-// Command gen draws minitail's menu bar icons.
+// Command gen draws minitail's menu bar icons: a small tail.
 //
 // They are macOS template images: pure black with an alpha channel, which lets
 // AppKit recolour them for the light and dark menu bar automatically. Run with
-// `go generate ./internal/icons`.
+// `go generate ./internal/icons` on the Go release go.mod names (for example
+// GOTOOLCHAIN=go1.24.6): CI regenerates them and compares the bytes, and
+// other releases compress PNGs differently.
 package main
 
 import (
@@ -16,8 +18,12 @@ import (
 	"os"
 )
 
-// size is 44px so the icon stays crisp on a Retina menu bar (22pt @2x).
-const size = 44
+// size is 32px because systray shows the icon at 16pt, so this is exactly
+// one pixel per pixel on a Retina menu bar (16pt @2x).
+const size = 32
+
+// dim is the opacity of a tail, or the part of one, that is not working.
+const dim = 0.35
 
 type canvas struct{ img *image.NRGBA }
 
@@ -41,21 +47,52 @@ func (c *canvas) set(x, y int, cov float64) {
 	c.img.SetNRGBA(x, y, color.NRGBA{A: a})
 }
 
-// ring draws an antialiased annulus centred on the canvas.
-func (c *canvas) ring(rOuter, rInner float64) {
-	cx, cy := float64(size)/2, float64(size)/2
+// point is a point on the tail's centre line, with t its distance along the
+// tail: 0 at the base, 1 at the tip.
+type point struct{ x, y, t float64 }
+
+// spine is the tail's centre line: two cubic Bézier curves that rise from the
+// bottom edge in an S and end in a flick to the left.
+var spine = func() []point {
+	curves := [][4][2]float64{
+		{{11, 32}, {4, 25}, {5, 17}, {13, 14}},
+		{{13, 14}, {21, 11}, {25, 5}, {19, 2}},
+	}
+	const steps = 1000
+	var pts []point
+	for i, p := range curves {
+		for j := 0; j <= steps; j++ {
+			s := float64(j) / steps
+			a, b, c, d := (1-s)*(1-s)*(1-s), 3*(1-s)*(1-s)*s, 3*(1-s)*s*s, s*s*s
+			pts = append(pts, point{
+				x: a*p[0][0] + b*p[1][0] + c*p[2][0] + d*p[3][0],
+				y: a*p[0][1] + b*p[1][1] + c*p[2][1] + d*p[3][1],
+				t: (float64(i) + s) / float64(len(curves)),
+			})
+		}
+	}
+	return pts
+}()
+
+// tail draws a stroke along spine that is radius(t) wide and alpha(t) opaque
+// at each point.
+func (c *canvas) tail(radius, alpha func(t float64) float64) {
 	for y := 0; y < size; y++ {
 		for x := 0; x < size; x++ {
-			d := math.Hypot(float64(x)+0.5-cx, float64(y)+0.5-cy)
-			// Coverage falls off over one pixel at each edge.
-			cov := math.Min(rOuter-d, d-rInner)
-			c.set(x, y, cov+0.5)
+			fx, fy := float64(x)+0.5, float64(y)+0.5
+			// The stroke is a union of discs, so the distance to its edge is
+			// the smallest distance to the edge of any one of them.
+			edge, at := math.Inf(1), 0.0
+			for _, p := range spine {
+				if d := math.Hypot(fx-p.x, fy-p.y) - radius(p.t); d < edge {
+					edge, at = d, p.t
+				}
+			}
+			// Coverage falls off over one pixel at the edge.
+			c.set(x, y, alpha(at)*math.Min(0.5-edge, 1))
 		}
 	}
 }
-
-// disc draws a filled antialiased circle.
-func (c *canvas) disc(r float64) { c.ring(r, -1) }
 
 // bar draws a filled rounded-ish rectangle in canvas coordinates.
 func (c *canvas) bar(x0, y0, x1, y1 float64) {
@@ -64,20 +101,6 @@ func (c *canvas) bar(x0, y0, x1, y1 float64) {
 			fx, fy := float64(x)+0.5, float64(y)+0.5
 			cov := math.Min(math.Min(fx-x0, x1-fx), math.Min(fy-y0, y1-fy))
 			c.set(x, y, cov+0.5)
-		}
-	}
-}
-
-// wedge fills the left half of a disc, for the "partly there" states.
-func (c *canvas) leftHalfDisc(r float64) {
-	cx, cy := float64(size)/2, float64(size)/2
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
-			fx, fy := float64(x)+0.5, float64(y)+0.5
-			if fx > cx {
-				continue
-			}
-			c.set(x, y, r-math.Hypot(fx-cx, fy-cy)+0.5)
 		}
 	}
 }
@@ -94,34 +117,43 @@ func (c *canvas) save(name string) {
 }
 
 func main() {
-	const rOuter, rInner = 17, 12
+	// The tail tapers from 3.6px at the base to 1px at the tip.
+	body := func(t float64) float64 { return 1 + 2.6*math.Pow(1-t, 0.85) }
+	line := func(float64) float64 { return 0.8 }
+	solid := func(float64) float64 { return 1 }
+	faint := func(float64) float64 { return dim }
 
-	// stopped: an empty ring.
+	// stopped: a faint tail.
 	c := newCanvas()
-	c.ring(rOuter, rInner)
+	c.tail(body, faint)
 	c.save("stopped.png")
 
-	// starting: a ring with a small centre dot.
+	// starting: a faint tail with a line drawn down its middle.
 	c = newCanvas()
-	c.ring(rOuter, rInner)
-	c.disc(4)
+	c.tail(body, faint)
+	c.tail(line, solid)
 	c.save("starting.png")
 
-	// attention: a ring around an exclamation mark, for login and errors.
+	// attention: a faint tail beside an exclamation mark, for login and errors.
 	c = newCanvas()
-	c.ring(rOuter, rInner)
-	c.bar(20, 12, 24, 25)
-	c.bar(20, 28, 24, 32)
+	c.tail(body, faint)
+	c.bar(23.6, 20, 26.4, 26)
+	c.bar(23.6, 27.6, 26.4, 30.4)
 	c.save("attention.png")
 
-	// partial: a half-filled ring, for advertised-but-not-approved.
+	// partial: a tail solid only from the base to halfway, for
+	// advertised-but-not-approved.
 	c = newCanvas()
-	c.ring(rOuter, rInner)
-	c.leftHalfDisc(rInner - 2)
+	c.tail(body, func(t float64) float64 {
+		if t < 0.5 {
+			return 1
+		}
+		return dim
+	})
 	c.save("partial.png")
 
-	// active: a solid disc.
+	// active: a solid tail.
 	c = newCanvas()
-	c.disc(rOuter)
+	c.tail(body, solid)
 	c.save("active.png")
 }
