@@ -156,6 +156,14 @@ func (s *Supervisor) Stats() (restarts int, givenUp bool, lastErr error) {
 	return s.restarts, s.givenUp, s.lastErr
 }
 
+// SetArgs replaces the child's arguments from its next start on. A running
+// child keeps the ones it was started with.
+func (s *Supervisor) SetArgs(args []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.opts.Args = args
+}
+
 // Kill sends SIGKILL to the current child without stopping supervision, so the
 // supervisor restarts it. It exists for the integration tests.
 func (s *Supervisor) Kill() error {
@@ -215,7 +223,10 @@ func (s *Supervisor) supervise(ctx context.Context, done chan struct{}) {
 }
 
 func (s *Supervisor) runOnce(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, s.opts.Path, s.opts.Args...)
+	s.mu.Lock()
+	args := s.opts.Args
+	s.mu.Unlock()
+	cmd := exec.CommandContext(ctx, s.opts.Path, args...)
 	cmd.Stdout = s.opts.Stdout
 	cmd.Stderr = s.opts.Stderr
 	if s.opts.Env != nil {

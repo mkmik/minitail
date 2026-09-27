@@ -15,12 +15,13 @@ import (
 type Client interface {
 	// Status returns the current backend status.
 	Status(ctx context.Context) (*Status, error)
-	// Up brings the node up, blocking until login completes. While it blocks,
-	// Status reports NeedsLogin together with an AuthURL.
-	Up(ctx context.Context) error
-	// Apply re-applies the configured preferences to an already logged-in
-	// node, so an edited config file takes effect without a re-login.
-	Apply(ctx context.Context) error
+	// Up brings the node up with the config file's [up] flags, blocking until
+	// login completes. While it blocks, Status reports NeedsLogin together
+	// with an AuthURL.
+	Up(ctx context.Context, upArgs []string) error
+	// Apply re-applies the [up] flags to an already logged-in node, so an
+	// edited config file takes effect without a re-login.
+	Apply(ctx context.Context, upArgs []string) error
 	// Logout removes the node from the tailnet and clears local state.
 	Logout(ctx context.Context) error
 }
@@ -32,8 +33,6 @@ type Options struct {
 	// GlobalArgs precede the subcommand; minitail uses them to point the CLI
 	// at this instance's socket.
 	GlobalArgs []string
-	// UpArgs are the flags from the config file's [up] section.
-	UpArgs []string
 	// Timeout bounds short-lived commands such as `status`.
 	Timeout time.Duration
 	// Logf receives command-level diagnostics.
@@ -76,19 +75,19 @@ func (c *CLI) Status(ctx context.Context) (*Status, error) {
 
 // Up runs `tailscale up`. It blocks until the node is authenticated, which for
 // an interactive login means until the user visits the auth URL.
-func (c *CLI) Up(ctx context.Context) error {
+func (c *CLI) Up(ctx context.Context, upArgs []string) error {
 	// No timeout: an interactive login legitimately takes as long as the user
 	// takes. The caller cancels ctx to give up.
-	_, err := c.run(ctx, c.args(append([]string{"up"}, c.opts.UpArgs...)...)...)
+	_, err := c.run(ctx, c.args(append([]string{"up"}, upArgs...)...)...)
 	return err
 }
 
 // Apply runs `tailscale set` with the same flags, which is how an edited
 // config file reaches a node that is already logged in.
-func (c *CLI) Apply(ctx context.Context) error {
+func (c *CLI) Apply(ctx context.Context, upArgs []string) error {
 	ctx, cancel := context.WithTimeout(ctx, c.opts.Timeout)
 	defer cancel()
-	_, err := c.run(ctx, c.args(append([]string{"set"}, setArgs(c.opts.UpArgs)...)...)...)
+	_, err := c.run(ctx, c.args(append([]string{"set"}, setArgs(upArgs)...)...)...)
 	return err
 }
 

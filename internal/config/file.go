@@ -144,12 +144,9 @@ func DefaultFile(hostname string) string {
 # One argument per line. Blank lines and # comments are ignored. Lines are not
 # shell-parsed, so a value containing spaces needs no quoting.
 #
-# After editing, restart minitail:
+# After editing, apply it with:
 #
-#     brew services restart minitail
-#
-# (Stop then Start in the menu bar restarts tailscaled, but does not reread
-# this file.)
+#     minitail reload
 
 [tailscaled]
 # Userspace networking is the point of minitail: tailscaled implements its

@@ -48,8 +48,10 @@ minitail is running and will start again at login.
 
       $BIN_DIR/minitail config path
 
-  The seeded file advertises a placeholder route (10.0.0.0/8). Edit it and
-  restart minitail.
+  The seeded file advertises a placeholder route (10.0.0.0/8). Edit it, then
+  apply it with:
+
+      $BIN_DIR/minitail reload
 
   Look for its icon in the menu bar. The first run opens a browser so you can
   log this node in to your tailnet; it then appears in the admin console as a

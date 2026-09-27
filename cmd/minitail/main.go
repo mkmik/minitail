@@ -53,6 +53,8 @@ func main() {
 		err = runCmd(rest)
 	case "status":
 		err = statusCmd(rest)
+	case "start", "stop", "reload", "reauthenticate", "quit":
+		err = commandCmd(cmd, rest)
 	case "config":
 		err = configCmd(rest)
 	case "service":
@@ -76,6 +78,11 @@ func usage(w *os.File) {
 Usage:
   minitail run [flags]        supervise tailscaled and show the menu bar icon
   minitail status [flags]     print the current state
+  minitail start              start the subnet router
+  minitail stop               stop the subnet router, leaving minitail running
+  minitail reload             reread the config file and apply it
+  minitail reauthenticate     log this node out and log it in again
+  minitail quit               stop the subnet router and quit minitail
   minitail config path        print the config file's location
   minitail config init        create the config file if it does not exist
   minitail config show        print the commands the config file produces
@@ -108,7 +115,7 @@ func runCmd(args []string) error {
 	}
 	if seeded {
 		log.Printf("wrote a default config to %s", cfg.Path)
-		log.Printf("it advertises a placeholder route; edit it and restart minitail")
+		log.Printf("it advertises a placeholder route; edit it and run `minitail reload`")
 	}
 
 	log.Printf("config %s", cfg.Path)
@@ -130,8 +137,8 @@ func runCmd(args []string) error {
 	defer cleanup()
 
 	go func() {
-		if err := app.ServeStatus(ctx, ctrl, cfg.ControlSocket); err != nil {
-			log.Printf("status socket: %v", err)
+		if err := app.ServeControl(ctx, ctrl, cfg.ControlSocket, cancel); err != nil {
+			log.Printf("control socket: %v", err)
 		}
 	}()
 
@@ -173,7 +180,6 @@ func newController(cfg config.Config) (*app.Controller, func()) {
 		Tailscale: tsctl.New(tsctl.Options{
 			Binary:     cfg.TailscalePath,
 			GlobalArgs: cfg.TailscaleArgs(),
-			UpArgs:     cfg.UpArgs(),
 			Logf:       log.Printf,
 		}),
 		Notifier: app.NotifyFunc(desktop.Notify),
@@ -245,6 +251,24 @@ func statusCmd(args []string) error {
 		fmt.Printf("%-12s %s\n", "health", h)
 	}
 	return nil
+}
+
+// commandCmd asks the running minitail to do what its menu item of the same
+// name does. reload has no menu item: it applies an edited config file.
+func commandCmd(name string, args []string) error {
+	cfg := config.Default()
+	fs := flag.NewFlagSet(name, flag.ExitOnError)
+	cfg.RegisterFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	// Only the socket's path is needed, not the binaries.
+	_ = cfg.Resolve()
+
+	// Long enough for tailscaled to shut down, or `tailscale logout` to time out.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return app.Command(ctx, cfg.ControlSocket, name)
 }
 
 // statusWithoutSupervisor derives a view straight from tailscaled, for when
