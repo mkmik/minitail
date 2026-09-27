@@ -49,9 +49,12 @@ class Minitail < Formula
         minitail config path
 
       The seeded file advertises a placeholder route (10.0.0.0/8). Edit it,
-      then restart. The first run opens a browser so you can log this node in
-      to your tailnet; it then appears in the admin console as a separate
-      machine, where you must approve its routes before peers can use them:
+      then apply it with:
+        minitail reload
+
+      The first run opens a browser so you can log this node in to your
+      tailnet; it then appears in the admin console as a separate machine,
+      where you must approve its routes before peers can use them:
         https://login.tailscale.com/admin/machines
     EOS
   end

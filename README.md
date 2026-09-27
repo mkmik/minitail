@@ -85,8 +85,11 @@ which point this instance at its own state and keep it separate from any
 system-wide Tailscale install. Setting either in the config file is an error
 rather than a silent override.
 
-After editing, restart minitail: `brew services restart minitail`. (Stop then
-Start in the menu bar restarts tailscaled, but does not reread the file.)
+After editing, run `minitail reload`. A file that does not parse is refused
+and the running configuration left alone. Otherwise `[up]` is applied with
+`tailscale set`, and tailscaled is restarted only if `[tailscaled]` changed,
+because a restart drops the connections routed through it. minitail does not
+watch the file, so nothing happens until you reload.
 
 ### First run, once
 
@@ -186,21 +189,26 @@ suite asserts both halves of that contrast.
 
 The menu bar icon shows the state; the menu has Start, Stop, Re-authenticate,
 Open admin console, Edit configuration…, Copy tailnet IP, and Quit. Quitting
-from the menu stays quit (the LaunchAgent only restarts minitail if it exits
-non-zero).
+stays quit (the LaunchAgent only restarts minitail if it exits non-zero).
 
 From a terminal:
 
 ```sh
 minitail status            # what it is doing right now, and which routes are pending
 minitail status --json     # the same, for scripts
+minitail reload            # apply an edited config file
+minitail stop              # the menu's Stop; `minitail start` is its Start
+minitail reauthenticate    # the menu's Re-authenticate…
+minitail quit              # the menu's Quit
 minitail config show       # the exact commands your config file produces
 minitail service status    # is the LaunchAgent loaded?
 minitail run -h            # minitail's own flags (Tailscale's live in the config)
 ```
 
-`minitail status` talks to the running supervisor over a unix socket, and falls
-back to querying tailscaled directly if minitail is not running.
+These talk to the running supervisor over a unix socket. `minitail status`
+alone falls back to querying tailscaled directly if minitail is not running.
+The menu's other items need no command: `status` prints the tailnet IP and any
+login URL, and `config path` locates the file to edit.
 
 `tailscaled`'s own output is in `~/.config/minitail/tailscaled.log`. minitail's
 own log depends on how you started it: `$(brew --prefix)/var/log/minitail.log`

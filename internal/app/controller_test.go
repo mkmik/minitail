@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ type fakeDaemon struct {
 	givenUp  bool
 	starts   int
 	stops    int
+	args     []string
 }
 
 func (d *fakeDaemon) Start(context.Context) {
@@ -51,6 +53,19 @@ func (d *fakeDaemon) Stats() (int, bool, error) {
 	return d.restarts, d.givenUp, nil
 }
 
+func (d *fakeDaemon) SetArgs(args []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.args = args
+}
+
+// lifecycle returns the Start and Stop counts, and the last arguments set.
+func (d *fakeDaemon) lifecycle() (starts, stops int, args []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.starts, d.stops, d.args
+}
+
 // fakeTailscale records the commands the controller would have run.
 type fakeTailscale struct {
 	mu        sync.Mutex
@@ -61,6 +76,7 @@ type fakeTailscale struct {
 	statusErr error
 	upErr     error
 	applyErr  error
+	applied   []string // the flags of the last Apply
 }
 
 func (f *fakeTailscale) Status(context.Context) (*tsctl.Status, error) {
@@ -69,7 +85,7 @@ func (f *fakeTailscale) Status(context.Context) (*tsctl.Status, error) {
 	return f.status, f.statusErr
 }
 
-func (f *fakeTailscale) Up(ctx context.Context) error {
+func (f *fakeTailscale) Up(ctx context.Context, _ []string) error {
 	f.mu.Lock()
 	f.ups++
 	err := f.upErr
@@ -88,11 +104,18 @@ func (f *fakeTailscale) failUp(err error) {
 	f.upErr = err
 }
 
-func (f *fakeTailscale) Apply(context.Context) error {
+func (f *fakeTailscale) Apply(_ context.Context, upArgs []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sets++
+	f.applied = upArgs
 	return f.applyErr
+}
+
+func (f *fakeTailscale) lastApplied() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.applied
 }
 
 func (f *fakeTailscale) failApply(err error) {
@@ -172,13 +195,17 @@ type harness struct {
 	dae  *fakeDaemon
 	ts   *fakeTailscale
 	rec  *recorder
+	path string // the config file Reload reads
 }
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{dae: &fakeDaemon{}, ts: &fakeTailscale{}, rec: &recorder{}}
 	cfg := config.Default()
+	cfg.Dir = t.TempDir() // never the real config file
+	_ = cfg.Resolve()     // for the paths; the binaries are not needed
 	cfg.PollInterval = time.Millisecond
+	h.path = cfg.Path
 	// The controller reads only the advertised routes out of the config.
 	f, err := config.ParseFile("[up]\n--advertise-routes=10.0.0.0/8\n")
 	if err != nil {
@@ -411,6 +438,56 @@ func TestControllerSurfacesConfigErrors(t *testing.T) {
 	h.waitFor(t, "recovery once `set` works", func(v app.View) bool {
 		return v.State == app.StateServing && v.ConfigErr == ""
 	})
+}
+
+// TestControllerReload applies an edited config file to a running node: its
+// routes by `tailscale set`, and tailscaled's own flags by a restart, which a
+// change to [up] alone must not cause.
+func TestControllerReload(t *testing.T) {
+	h := newHarness(t)
+	h.ts.setStatus(loadFixture(t, "running-approved"))
+	h.runUntil(t, "serving", func(v app.View) bool {
+		return v.State == app.StateServing
+	})
+	reload := func(file string) error {
+		t.Helper()
+		if err := os.WriteFile(h.path, []byte(file), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return h.ctrl.Reload(t.Context())
+	}
+
+	if err := reload("[up]\n--advertise-routes=10.0.0.0/8,nonsense\n"); err == nil {
+		t.Error("Reload accepted a route that is not a CIDR prefix")
+	}
+	if v := h.ctrl.View(); v.State != app.StateServing {
+		t.Errorf("State = %q after a refused reload, want it untouched", v.State)
+	}
+
+	const routes = "--advertise-routes=10.0.0.0/8,192.168.0.0/16"
+	if err := reload("[up]\n" + routes + "\n"); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	v := h.waitFor(t, "the new route to be set", func(app.View) bool {
+		return slices.Contains(h.ts.lastApplied(), routes)
+	})
+	if !slices.Equal(v.PendingRoutes, []string{"192.168.0.0/16"}) {
+		t.Errorf("PendingRoutes = %v, want the new route awaiting approval", v.PendingRoutes)
+	}
+	if _, stops, _ := h.dae.lifecycle(); stops != 0 {
+		t.Errorf("tailscaled stopped %d times for a change to [up], want none", stops)
+	}
+
+	if err := reload("[tailscaled]\n--port=41643\n[up]\n" + routes + "\n"); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	starts, stops, args := h.dae.lifecycle()
+	if starts != 2 || stops != 1 {
+		t.Errorf("tailscaled started %d and stopped %d times, want one restart", starts, stops)
+	}
+	if !slices.Contains(args, "--port=41643") {
+		t.Errorf("tailscaled args = %q, want the new flag", args)
+	}
 }
 
 func TestControllerReauthenticate(t *testing.T) {

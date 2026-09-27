@@ -3,6 +3,7 @@ package app
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"net/netip"
 	"slices"
 	"strings"
@@ -43,6 +44,7 @@ type Daemon interface {
 	Stop()
 	Running() bool
 	Stats() (restarts int, givenUp bool, lastErr error)
+	SetArgs(args []string)
 }
 
 // Options configures a Controller.
@@ -60,12 +62,18 @@ type Options struct {
 type Controller struct {
 	opts Options
 
-	// advertised is what the config file asks to advertise, parsed once:
-	// the file does not change while minitail runs.
+	// cmdMu serializes Start, Stop and Reload, which the menu and the control
+	// socket can call at the same time.
+	cmdMu sync.Mutex
+
+	mu sync.Mutex
+	// file is the config file as last read, which Reload replaces;
+	// opts.Config.File is only the one minitail started with. advertised is
+	// what it asks to advertise.
+	file          config.File
 	advertised    []netip.Prefix
 	advertisedErr error
 
-	mu        sync.Mutex
 	want      bool
 	status    *tsctl.Status
 	statusErr error
@@ -100,11 +108,12 @@ func NewController(opts Options) *Controller {
 	}
 	c := &Controller{
 		opts:       opts,
+		file:       opts.Config.File,
 		subs:       map[int]chan View{},
 		appliedFor: -1,
 		poke:       make(chan struct{}, 1),
 	}
-	c.advertised, c.advertisedErr = opts.Config.File.AdvertisedRoutes()
+	c.advertised, c.advertisedErr = c.file.AdvertisedRoutes()
 	if c.advertisedErr != nil {
 		// Said once here; the view keeps showing it.
 		opts.Logf("reading advertised routes from the config file: %v", c.advertisedErr)
@@ -162,6 +171,8 @@ func (c *Controller) Run(ctx context.Context) {
 
 // Start asks for the daemon to be running.
 func (c *Controller) Start(ctx context.Context) {
+	c.cmdMu.Lock()
+	defer c.cmdMu.Unlock()
 	c.mu.Lock()
 	already := c.want
 	c.want = true
@@ -177,6 +188,8 @@ func (c *Controller) Start(ctx context.Context) {
 
 // Stop shuts the daemon down and leaves it down.
 func (c *Controller) Stop() {
+	c.cmdMu.Lock()
+	defer c.cmdMu.Unlock()
 	c.mu.Lock()
 	already := !c.want
 	c.want = false
@@ -186,6 +199,42 @@ func (c *Controller) Stop() {
 		c.opts.Daemon.Stop()
 	}
 	c.refresh()
+}
+
+// Reload rereads the config file and applies it without restarting minitail.
+// A file minitail cannot parse is refused and the node left as it was. The
+// [up] flags are reapplied by the polling loop, as after Start. tailscaled is
+// restarted only if its own flags changed, because that drops every
+// connection routed through it.
+func (c *Controller) Reload(ctx context.Context) error {
+	c.cmdMu.Lock()
+	defer c.cmdMu.Unlock()
+
+	cfg := c.opts.Config
+	if _, err := cfg.Load(); err != nil {
+		return err
+	}
+	advertised, err := cfg.File.AdvertisedRoutes()
+	if err != nil {
+		return fmt.Errorf("%s: %w", cfg.Path, err)
+	}
+
+	c.mu.Lock()
+	restart := c.want && !slices.Equal(c.file.Tailscaled, cfg.File.Tailscaled)
+	c.file, c.advertised, c.advertisedErr = cfg.File, advertised, nil
+	c.appliedFor, c.applyErr = -1, nil
+	c.mu.Unlock()
+
+	c.opts.Logf("reloaded %s", cfg.Path)
+	c.opts.Daemon.SetArgs(cfg.TailscaledArgs())
+	if restart {
+		c.opts.Logf("restarting tailscaled %s", strings.Join(cfg.TailscaledArgs(), " "))
+		c.opts.Daemon.Stop()
+		c.opts.Daemon.Start(ctx)
+	}
+	c.refresh()
+	c.Poke()
+	return nil
 }
 
 // Reauthenticate forgets the current login and starts a fresh one. The polling
@@ -343,10 +392,11 @@ func (c *Controller) startLogin(ctx context.Context) {
 		return
 	}
 	c.upInFlight = true
+	upArgs := c.file.Up
 	c.mu.Unlock()
 
 	go func() {
-		err := c.opts.Tailscale.Up(ctx)
+		err := c.opts.Tailscale.Up(ctx, upArgs)
 		c.mu.Lock()
 		c.upInFlight = false
 		changed := errDetail("", err) != errDetail("", c.applyErr)
@@ -383,14 +433,15 @@ func (c *Controller) applyPrefs(ctx context.Context) {
 		return
 	}
 	c.appliedFor = restarts
+	upArgs := c.file.Up
 	c.mu.Unlock()
 
-	err := c.opts.Tailscale.Apply(ctx)
+	err := c.opts.Tailscale.Apply(ctx, upArgs)
 
 	c.mu.Lock()
 	if ctx.Err() != nil || !c.want || c.appliedFor != restarts {
-		// Shutting down, or Stop/Start ran meanwhile: the result belongs
-		// to a generation that is over.
+		// Shutting down, or Stop/Start/Reload ran meanwhile: the result
+		// belongs to a generation that is over.
 		c.mu.Unlock()
 		return
 	}
